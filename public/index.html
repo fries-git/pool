@@ -99,8 +99,14 @@ function draw(){
   requestAnimationFrame(draw);
 }
 function drawBall(b){ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,Math.PI*2);ctx.fillStyle=b.id==='cue'?'#fff':'#e24d4d';ctx.fill();ctx.strokeStyle='#222';ctx.lineWidth=1.5;ctx.stroke();}
+
+// Drag & shoot
 canvas.addEventListener('mousedown',e=>{
   if(!state) return;
+  if(state.turn!==myId) return; // only shoot on your turn
+  // check balls nearly stopped
+  if(!state.balls.every(b=>Math.hypot(b.vx,b.vy)<0.05)) return;
+
   const rect=canvas.getBoundingClientRect();
   const x=e.clientX-rect.left,y=e.clientY-rect.top;
   const cue=state.balls.find(b=>b.id==='cue');
@@ -147,6 +153,7 @@ function addChatMessage(from,msg){
   chatDiv.scrollTop=chatDiv.scrollHeight;
 }
 
+// Auto request state
 setInterval(()=>{if(ws && ws.readyState===1) ws.send(JSON.stringify({t:'request_state'}));},2000);
 
 draw();
