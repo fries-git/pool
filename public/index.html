@@ -1,0 +1,149 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Multiplayer Pool</title>
+<style>
+  html,body{height:100%;margin:0;background:#111;color:#ddd;font-family:system-ui}
+  #ui{position:fixed;left:12px;top:12px;z-index:10}
+  #canvas{display:block;margin:40px auto;border:8px solid #2b2b2b;box-shadow:0 8px 30px rgba(0,0,0,0.8)}
+  button,input{margin:4px}
+</style>
+</head>
+<body>
+<div id="ui">
+  <button id="create">Create Room</button>
+  <input id="room" placeholder="ROOM" style="text-transform:uppercase"/>
+  <button id="join">Join Room</button>
+  <span id="status">disconnected</span>
+</div>
+<canvas id="canvas" width="800" height="400"></canvas>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let ws;
+let roomCode = null;
+let state = null;
+const statusEl = document.getElementById('status');
+
+function connect() {
+  if (ws && (ws.readyState === 1 || ws.readyState === 0)) return;
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(“https://pool-o8c6.onrender.com”)
+  ws.onopen = ()=>status('connected');
+  ws.onclose = ()=>status('disconnected');
+  ws.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.t === 'joined') {
+      roomCode = m.code;
+      status('in room ' + roomCode);
+    } else if (m.t === 'state') {
+      state = m.state;
+    } else if (m.t === 'error') {
+      status('error: ' + m.msg);
+    }
+  };
+}
+
+function status(s){ statusEl.textContent = s; }
+
+document.getElementById('create').onclick = () => {
+  connect();
+  ws.onopen = ()=> { ws.send(JSON.stringify({t:'create'})); status('creating...'); };
+};
+
+document.getElementById('join').onclick = () => {
+  const code = document.getElementById('room').value.trim().toUpperCase();
+  if (!code) return;
+  connect();
+  ws.onopen = ()=> { ws.send(JSON.stringify({t:'join', code})); status('joining...'); };
+};
+
+// draw loop
+function draw() {
+  ctx.fillStyle = '#0b5a2b';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  if (!state) {
+    ctx.fillStyle = '#fff';
+    ctx.fillText('Not in a room. Create or join one.', 20, 20);
+    requestAnimationFrame(draw);
+    return;
+  }
+  // table border
+  ctx.fillStyle = '#01361f';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  // draw balls
+  for (const b of state.balls) {
+    drawBall(b);
+  }
+  requestAnimationFrame(draw);
+}
+
+function drawBall(b){
+  ctx.beginPath();
+  ctx.arc(b.x, b.y, b.r, 0, Math.PI*2);
+  ctx.fillStyle = (b.id === 'cue') ? '#ffffff' : '#d14d4d';
+  ctx.fill();
+  ctx.strokeStyle = '#222';
+  ctx.stroke();
+}
+
+// input: click-drag to set angle/power
+let drag = null;
+canvas.addEventListener('mousedown', (e) => {
+  if (!state) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  const cue = state.balls.find(b=>b.id==='cue');
+  if (!cue) return;
+  drag = { x0: x, y0: y, cue };
+});
+canvas.addEventListener('mousemove', (e) => {
+  if (!drag) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  // show line
+  renderAimLine(drag.cue.x, drag.cue.y, x, y);
+});
+window.addEventListener('mouseup', (e) => {
+  if (!drag) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  const dx = (drag.cue.x - x);
+  const dy = (drag.cue.y - y);
+  const dist = Math.hypot(dx,dy);
+  const power = Math.min(1, dist / 150);
+  const angle = Math.atan2(dy, dx) + Math.PI; // send direction forward
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ t:'shoot', power, angle }));
+  }
+  drag = null;
+});
+
+function renderAimLine(cx, cy, mx, my) {
+  // draw current frame and aim line
+  if (!state) return;
+  // clear and redraw once
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle = '#0b5a2b';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  for (const b of state.balls) drawBall(b);
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(mx, my);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
+
+// auto-request state periodically in case of missed packets
+setInterval(()=>{ if(ws && ws.readyState===1) ws.send(JSON.stringify({t:'request_state'})); }, 2000);
+
+draw();
+</script>
+</body>
+</html>
+
+
