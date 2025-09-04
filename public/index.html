@@ -1,138 +1,155 @@
-const express = require('express');
-const { WebSocketServer } = require('ws');
-const { v4: uuidv4 } = require('uuid');
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Multiplayer Pool</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;font-family:system-ui;background:#121212;color:#eee;display:flex;flex-direction:column;align-items:center;}
+  #topbar{margin:12px;display:flex;gap:8px;align-items:center;}
+  input,button{padding:6px 12px;border-radius:6px;border:none;font-size:14px;}
+  input{width:100px;text-transform:uppercase;background:#1e1e1e;color:#eee;}
+  button{background:#2a9df4;color:#fff;cursor:pointer;transition:0.2s;box-shadow:0 2px 6px rgba(0,0,0,0.5);}
+  button:hover{background:#1c7ecf;}
+  #status{margin-left:10px;font-weight:bold;color:#aaa;}
+  #canvas{border:6px solid #1e1e1e;box-shadow:0 8px 20px rgba(0,0,0,0.7);background:#01361f;margin-top:12px;}
+  #sidepanel{margin-top:12px;display:flex;gap:12px;}
+  #players,#chat{background:#1e1e1e;padding:8px;border-radius:6px;max-height:200px;overflow-y:auto;width:150px;}
+  #chat input{width:100%;margin-top:4px;}
+  .player-turn{color:#2a9df4;font-weight:bold;}
+</style>
+</head>
+<body>
 
-const app = express();
-const PORT = process.env.PORT || 3000;
-app.use(express.static('public'));
+<div id="topbar">
+  <input id="username" placeholder="USERNAME"/>
+  <button id="create">Create Room</button>
+  <input id="room" placeholder="ROOM"/>
+  <button id="join">Join Room</button>
+  <span id="status">disconnected</span>
+</div>
 
-const server = app.listen(PORT, () => console.log(`HTTP running on ${PORT}`));
-const wss = new WebSocketServer({ server });
+<canvas id="canvas" width="800" height="400"></canvas>
 
-const rooms = new Map();
+<div id="sidepanel">
+  <div id="players"><strong>Players:</strong><br></div>
+  <div id="chat"><strong>Chat:</strong><br><input type="text" id="chatinput" placeholder="Type..." /></div>
+</div>
 
-function generateRoomCode(len=4){
-  const chars='ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  let code='';
-  for(let i=0;i<len;i++) code+=chars[Math.floor(Math.random()*chars.length)];
-  return code;
+<script>
+const canvas=document.getElementById('canvas');
+const ctx=canvas.getContext('2d');
+let ws,roomCode=null,state=null,myId=null,username=null;
+const statusEl=document.getElementById('status');
+const playersEl=document.getElementById('players');
+const chatInput=document.getElementById('chatinput');
+const chatDiv=document.getElementById('chat');
+
+function status(s){statusEl.textContent=s;}
+function connect(){
+  if(ws && (ws.readyState===1||ws.readyState===0)) return;
+  ws=new WebSocket("wss://pool-o8c6.onrender.com");
+  ws.onopen=()=>status('connected');
+  ws.onclose=()=>status('disconnected');
+  ws.onmessage=(ev)=>{
+    const m=JSON.parse(ev.data);
+    if(m.t==='joined'){roomCode=m.code;myId=m.id||null;status('in room '+roomCode);}
+    else if(m.t==='state'){state=m.state;renderPlayers();}
+    else if(m.t==='chat'){addChatMessage(m.from,m.msg);}
+    else if(m.t==='error'){status('error: '+m.msg);}
+  };
 }
 
-function updateBalls(room){
-  if(!room.state) return;
-  for(const b of room.state.balls){
-    b.x+=b.vx;
-    b.y+=b.vy;
-    b.vx*=0.98; // friction
-    b.vy*=0.98;
-    if(b.x-b.r<0){b.x=b.r;b.vx*=-1;}
-    if(b.x+b.r>800){b.x=800-b.r;b.vx*=-1;}
-    if(b.y-b.r<0){b.y=b.r;b.vy*=-1;}
-    if(b.y+b.r>400){b.y=400-b.r;b.vy*=-1;}
+// Create/join handlers
+document.getElementById('create').onclick=()=>{
+  username=document.getElementById('username').value.trim()||'Player';
+  connect();
+  if(ws.readyState===1) ws.send(JSON.stringify({t:'create',name:username}));
+  else ws.addEventListener('open',()=>ws.send(JSON.stringify({t:'create',name:username})),{once:true});
+};
+document.getElementById('join').onclick=()=>{
+  username=document.getElementById('username').value.trim()||'Player';
+  const code=document.getElementById('room').value.trim().toUpperCase();
+  if(!code) return;
+  connect();
+  if(ws.readyState===1) ws.send(JSON.stringify({t:'join',code,name:username}));
+  else ws.addEventListener('open',()=>ws.send(JSON.stringify({t:'join',code,name:username})),{once:true});
+};
+
+// Chat send
+chatInput.addEventListener('keydown',e=>{
+  if(e.key==='Enter' && chatInput.value.trim() && ws && ws.readyState===1){
+    ws.send(JSON.stringify({t:'chat',msg:chatInput.value.trim()}));
+    chatInput.value='';
   }
-}
-
-function broadcastState(room){
-  const payload=JSON.stringify({
-    t:'state',
-    state:{
-      balls:room.state.balls,
-      players:room.players.map(p=>({id:p.id,name:p.name})),
-      turn:room.players[room.turnIndex]?.id||null
-    }
-  });
-  room.players.forEach(p=>{if(p.ws.readyState===1)p.ws.send(payload);});
-}
-
-function nextTurn(room){
-  if(!room.players.length) return;
-  room.turnIndex=(room.turnIndex+1)%room.players.length;
-}
-
-setInterval(()=>{
-  rooms.forEach(room=>{
-    updateBalls(room);
-    broadcastState(room);
-  });
-},1000/30);
-
-wss.on('connection', ws=>{
-  ws.id=uuidv4();
-  ws.on('message', msg=>{
-    let m;
-    try{ m=JSON.parse(msg);}catch{return;}
-    const t=m.t;
-
-    // create room
-    if(t==='create'){
-      const code=generateRoomCode();
-      const room={
-        code,
-        players:[],
-        turnIndex:0,
-        state:{
-          balls:[
-            {id:'cue',x:400,y:300,r:8,vx:0,vy:0},
-            {id:'b1',x:500,y:300,r:8,vx:0,vy:0},
-            {id:'b2',x:550,y:300,r:8,vx:0,vy:0}
-          ]
-        }
-      };
-      rooms.set(code,room);
-      ws.room=code;
-      ws.name=m.name||'Player';
-      room.players.push({id:ws.id,ws,name:ws.name});
-      ws.send(JSON.stringify({t:'joined',code,id:ws.id}));
-      return;
-    }
-
-    // join room
-    if(t==='join'){
-      const code=m.code;
-      const room=rooms.get(code);
-      if(!room){ws.send(JSON.stringify({t:'error',msg:'Room not found'}));return;}
-      ws.room=code;
-      ws.name=m.name||'Player';
-      room.players.push({id:ws.id,ws,name:ws.name});
-      ws.send(JSON.stringify({t:'joined',code,id:ws.id}));
-      return;
-    }
-
-    // shoot
-    if(t==='shoot'){
-      const room=rooms.get(ws.room);
-      if(!room) return;
-      const player=room.players[room.turnIndex];
-      if(player.id!==ws.id) return; // enforce turn
-      const cue=room.state.balls.find(b=>b.id==='cue');
-      if(!cue) return;
-      cue.vx=Math.cos(m.angle)*m.power*10;
-      cue.vy=Math.sin(m.angle)*m.power*10;
-      nextTurn(room);
-      return;
-    }
-
-    // chat
-    if(t==='chat'){
-      const room=rooms.get(ws.room);
-      if(!room) return;
-      const payload=JSON.stringify({t:'chat',from:ws.name,msg:m.msg});
-      room.players.forEach(p=>{if(p.ws.readyState===1)p.ws.send(payload);});
-      return;
-    }
-
-    // request state
-    if(t==='request_state'){
-      const room=rooms.get(ws.room);
-      if(room) broadcastState(room);
-      return;
-    }
-  });
-
-  ws.on('close', ()=>{
-    const room=rooms.get(ws.room);
-    if(!room) return;
-    room.players=room.players.filter(p=>p.id!==ws.id);
-    if(room.players.length===0) rooms.delete(ws.room);
-  });
 });
+
+// Draw loop
+let drag=null;
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle='#01361f';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  if(state){
+    for(const b of state.balls) drawBall(b);
+    if(drag) renderAimLine(drag.cue.x,drag.cue.y,drag.mx,drag.my);
+  }else{
+    ctx.fillStyle='#aaa';ctx.font='16px system-ui';
+    ctx.fillText('Create or join a room to start.',20,30);
+  }
+  requestAnimationFrame(draw);
+}
+function drawBall(b){ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,Math.PI*2);ctx.fillStyle=b.id==='cue'?'#fff':'#e24d4d';ctx.fill();ctx.strokeStyle='#222';ctx.lineWidth=1.5;ctx.stroke();}
+canvas.addEventListener('mousedown',e=>{
+  if(!state) return;
+  const rect=canvas.getBoundingClientRect();
+  const x=e.clientX-rect.left,y=e.clientY-rect.top;
+  const cue=state.balls.find(b=>b.id==='cue');
+  if(!cue) return;
+  drag={x0:x,y0:y,cue,cx:cue.x,cy:cue.y,mx:x,my:y};
+});
+canvas.addEventListener('mousemove',e=>{if(drag){const rect=canvas.getBoundingClientRect();drag.mx=e.clientX-rect.left;drag.my=e.clientY-rect.top;}});
+window.addEventListener('mouseup',e=>{
+  if(!drag) return;
+  const dx=drag.cx-drag.mx,dy=drag.cy-drag.my;
+  const dist=Math.hypot(dx,dy),power=Math.min(1,dist/150);
+  const angle=Math.atan2(dy,dx)+Math.PI;
+  if(ws && ws.readyState===1) ws.send(JSON.stringify({t:'shoot',power,angle}));
+  drag=null;
+});
+
+function renderAimLine(cx,cy,mx,my){
+  const dx=mx-cx,dy=my-cy;
+  const length=50;
+  const angle=Math.atan2(dy,dx);
+  const ex=cx+Math.cos(angle)*length;
+  const ey=cy+Math.sin(angle)*length;
+  ctx.beginPath();
+  ctx.moveTo(cx,cy);
+  ctx.lineTo(ex,ey);
+  ctx.strokeStyle='#fff';
+  ctx.lineWidth=2;
+  ctx.stroke();
+}
+
+function renderPlayers(){
+  if(!state||!state.players) return;
+  let html='<strong>Players:</strong><br>';
+  state.players.forEach(p=>{
+    html+=`<span${p.id===state.turn?' class="player-turn"':''}>${p.name}</span><br>`;
+  });
+  playersEl.innerHTML=html;
+}
+
+function addChatMessage(from,msg){
+  const div=document.createElement('div');
+  div.textContent=`${from}: ${msg}`;
+  chatDiv.insertBefore(div,chatInput);
+  chatDiv.scrollTop=chatDiv.scrollHeight;
+}
+
+setInterval(()=>{if(ws && ws.readyState===1) ws.send(JSON.stringify({t:'request_state'}));},2000);
+
+draw();
+</script>
+</body>
+</html>
