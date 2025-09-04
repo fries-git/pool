@@ -1,149 +1,129 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-<meta charset="utf-8" />
+<meta charset="UTF-8">
 <title>Multiplayer Pool</title>
 <style>
-  html,body{height:100%;margin:0;background:#111;color:#ddd;font-family:system-ui}
-  #ui{position:fixed;left:12px;top:12px;z-index:10}
-  #canvas{display:block;margin:40px auto;border:8px solid #2b2b2b;box-shadow:0 8px 30px rgba(0,0,0,0.8)}
-  button,input{margin:4px}
+  html,body{margin:0;padding:0;height:100%;font-family:system-ui;background:#121212;color:#eee;display:flex;flex-direction:column;align-items:center;}
+  #topbar{margin:12px;display:flex;gap:8px;align-items:center;}
+  input,button{padding:6px 12px;border-radius:6px;border:none;font-size:14px;}
+  input{width:100px;text-transform:uppercase;background:#1e1e1e;color:#eee;}
+  button{background:#2a9df4;color:#fff;cursor:pointer;transition:0.2s;box-shadow:0 2px 6px rgba(0,0,0,0.5);}
+  button:hover{background:#1c7ecf;}
+  #status{margin-left:10px;font-weight:bold;color:#aaa;}
+  #canvas{border:6px solid #1e1e1e;box-shadow:0 8px 20px rgba(0,0,0,0.7);background:#01361f;margin-top:12px;}
 </style>
 </head>
 <body>
-<div id="ui">
+
+<div id="topbar">
+  <input id="username" placeholder="USERNAME"/>
   <button id="create">Create Room</button>
-  <input id="room" placeholder="ROOM" style="text-transform:uppercase"/>
+  <input id="room" placeholder="ROOM"/>
   <button id="join">Join Room</button>
   <span id="status">disconnected</span>
 </div>
+
 <canvas id="canvas" width="800" height="400"></canvas>
 
 <script>
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
-let ws;
-let roomCode = null;
-let state = null;
-const statusEl = document.getElementById('status');
+const canvas=document.getElementById('canvas');
+const ctx=canvas.getContext('2d');
+let ws,roomCode=null,state=null,myId=null,username=null;
+const statusEl=document.getElementById('status');
 
-function connect() {
-  if (ws && (ws.readyState === 1 || ws.readyState === 0)) return;
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(“https://pool-o8c6.onrender.com”)
-  ws.onopen = ()=>status('connected');
-  ws.onclose = ()=>status('disconnected');
-  ws.onmessage = (ev) => {
-    const m = JSON.parse(ev.data);
-    if (m.t === 'joined') {
-      roomCode = m.code;
-      status('in room ' + roomCode);
-    } else if (m.t === 'state') {
-      state = m.state;
-    } else if (m.t === 'error') {
-      status('error: ' + m.msg);
-    }
+function status(s){statusEl.textContent=s;}
+
+function connect(){
+  if(ws && (ws.readyState===1||ws.readyState===0)) return;
+  ws=new WebSocket("wss://pool-o8c6.onrender.com");
+  ws.onopen=()=>status('connected');
+  ws.onclose=()=>status('disconnected');
+  ws.onmessage=(ev)=>{
+    const m=JSON.parse(ev.data);
+    if(m.t==='joined'){roomCode=m.code;myId=m.id||null;status('in room '+roomCode);}
+    else if(m.t==='state'){state=m.state;}
+    else if(m.t==='error'){status('error: '+m.msg);}
   };
 }
 
-function status(s){ statusEl.textContent = s; }
-
-document.getElementById('create').onclick = () => {
+// Create room
+document.getElementById('create').onclick=()=>{
+  username=document.getElementById('username').value.trim()||'Player';
   connect();
-  ws.onopen = ()=> { ws.send(JSON.stringify({t:'create'})); status('creating...'); };
+  if(ws.readyState===1){ws.send(JSON.stringify({t:'create',name:username}));status('creating...');}
+  else ws.addEventListener('open',()=>{ws.send(JSON.stringify({t:'create',name:username}));status('creating...');},{once:true});
 };
 
-document.getElementById('join').onclick = () => {
-  const code = document.getElementById('room').value.trim().toUpperCase();
-  if (!code) return;
+// Join room
+document.getElementById('join').onclick=()=>{
+  username=document.getElementById('username').value.trim()||'Player';
+  const code=document.getElementById('room').value.trim().toUpperCase();
+  if(!code) return;
   connect();
-  ws.onopen = ()=> { ws.send(JSON.stringify({t:'join', code})); status('joining...'); };
+  if(ws.readyState===1){ws.send(JSON.stringify({t:'join',code,name:username}));status('joining...');}
+  else ws.addEventListener('open',()=>{ws.send(JSON.stringify({t:'join',code,name:username}));status('joining...');},{once:true});
 };
 
-// draw loop
-function draw() {
-  ctx.fillStyle = '#0b5a2b';
+// Draw loop
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle='#01361f';
   ctx.fillRect(0,0,canvas.width,canvas.height);
-  if (!state) {
-    ctx.fillStyle = '#fff';
-    ctx.fillText('Not in a room. Create or join one.', 20, 20);
-    requestAnimationFrame(draw);
-    return;
-  }
-  // table border
-  ctx.fillStyle = '#01361f';
-  ctx.fillRect(0,0,canvas.width,canvas.height);
-
-  // draw balls
-  for (const b of state.balls) {
-    drawBall(b);
+  if(state){
+    for(const b of state.balls) drawBall(b);
+    if(drag) renderAimLine(drag.cue.x,drag.cue.y,drag.mx,drag.my);
+  }else{
+    ctx.fillStyle='#aaa';ctx.font='16px system-ui';ctx.fillText('Create or join a room to start.',20,30);
   }
   requestAnimationFrame(draw);
 }
 
-function drawBall(b){
+function drawBall(b){ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,Math.PI*2);ctx.fillStyle=b.id==='cue'?'#fff':'#e24d4d';ctx.fill();ctx.strokeStyle='#222';ctx.lineWidth=1.5;ctx.stroke();}
+
+// Input: click-drag to shoot with short aim preview
+let drag=null;
+canvas.addEventListener('mousedown',e=>{
+  if(!state) return;
+  const rect=canvas.getBoundingClientRect();
+  const x=e.clientX-rect.left,y=e.clientY-rect.top;
+  const cue=state.balls.find(b=>b.id==='cue');
+  if(!cue) return;
+  drag={x0:x,y0:y,cue,cx:cue.x,cy:cue.y,mx:x,my:y};
+});
+canvas.addEventListener('mousemove',e=>{
+  if(!drag) return;
+  const rect=canvas.getBoundingClientRect();
+  drag.mx=e.clientX-rect.left;
+  drag.my=e.clientY-rect.top;
+});
+window.addEventListener('mouseup',e=>{
+  if(!drag) return;
+  const dx=drag.cx-drag.mx,dy=drag.cy-drag.my;
+  const dist=Math.hypot(dx,dy),power=Math.min(1,dist/150);
+  const angle=Math.atan2(dy,dx)+Math.PI;
+  if(ws && ws.readyState===1) ws.send(JSON.stringify({t:'shoot',power,angle}));
+  drag=null;
+});
+
+function renderAimLine(cx,cy,mx,my){
+  const dx=mx-cx,dy=my-cy;
+  const length=50; // short line preview
+  const angle=Math.atan2(dy,dx);
+  const ex=cx+Math.cos(angle)*length;
+  const ey=cy+Math.sin(angle)*length;
   ctx.beginPath();
-  ctx.arc(b.x, b.y, b.r, 0, Math.PI*2);
-  ctx.fillStyle = (b.id === 'cue') ? '#ffffff' : '#d14d4d';
-  ctx.fill();
-  ctx.strokeStyle = '#222';
+  ctx.moveTo(cx,cy);
+  ctx.lineTo(ex,ey);
+  ctx.strokeStyle='#fff';
+  ctx.lineWidth=2;
   ctx.stroke();
 }
 
-// input: click-drag to set angle/power
-let drag = null;
-canvas.addEventListener('mousedown', (e) => {
-  if (!state) return;
-  const rect = canvas.getBoundingClientRect();
-  const x = e.clientX - rect.left, y = e.clientY - rect.top;
-  const cue = state.balls.find(b=>b.id==='cue');
-  if (!cue) return;
-  drag = { x0: x, y0: y, cue };
-});
-canvas.addEventListener('mousemove', (e) => {
-  if (!drag) return;
-  const rect = canvas.getBoundingClientRect();
-  const x = e.clientX - rect.left, y = e.clientY - rect.top;
-  // show line
-  renderAimLine(drag.cue.x, drag.cue.y, x, y);
-});
-window.addEventListener('mouseup', (e) => {
-  if (!drag) return;
-  const rect = canvas.getBoundingClientRect();
-  const x = e.clientX - rect.left, y = e.clientY - rect.top;
-  const dx = (drag.cue.x - x);
-  const dy = (drag.cue.y - y);
-  const dist = Math.hypot(dx,dy);
-  const power = Math.min(1, dist / 150);
-  const angle = Math.atan2(dy, dx) + Math.PI; // send direction forward
-  if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ t:'shoot', power, angle }));
-  }
-  drag = null;
-});
-
-function renderAimLine(cx, cy, mx, my) {
-  // draw current frame and aim line
-  if (!state) return;
-  // clear and redraw once
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  ctx.fillStyle = '#0b5a2b';
-  ctx.fillRect(0,0,canvas.width,canvas.height);
-  for (const b of state.balls) drawBall(b);
-  ctx.beginPath();
-  ctx.moveTo(cx, cy);
-  ctx.lineTo(mx, my);
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 2;
-  ctx.stroke();
-}
-
-// auto-request state periodically in case of missed packets
-setInterval(()=>{ if(ws && ws.readyState===1) ws.send(JSON.stringify({t:'request_state'})); }, 2000);
+// auto-request state
+setInterval(()=>{if(ws && ws.readyState===1) ws.send(JSON.stringify({t:'request_state'}));},2000);
 
 draw();
 </script>
 </body>
 </html>
-
-
