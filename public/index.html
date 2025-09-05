@@ -2,51 +2,59 @@
 <html>
 <head>
 <meta charset="utf-8" />
-<title>Pool (8-ball) — Multiplayer</title>
+<title>Pool — improved client</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
 <style>
-  :root{--bg:#121212;--panel:#1e1e1e;--accent:#2a9df4;--muted:#aaa}
-  html,body{height:100%;margin:0;background:var(--bg);color:#eee;font-family:system-ui}
-  .top{display:flex;gap:8px;padding:12px;align-items:center}
-  input,button{padding:8px;border-radius:8px;border:none;background:var(--panel);color:#eee}
-  button{background:var(--accent);cursor:pointer}
-  #container{display:flex;gap:12px;align-items:flex-start;justify-content:center;padding-bottom:24px}
-  canvas{border:8px solid #111;box-shadow:0 8px 40px rgba(0,0,0,0.7);background:#01361f}
-  .panel{width:220px;background:var(--panel);padding:10px;border-radius:8px;max-height:520px;overflow:auto}
-  .players .current{color:var(--accent);font-weight:700}
-  .pocketed{display:flex;gap:6px;flex-wrap:wrap}
-  .ball-swatch{width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;color:#000;border:2px solid #222}
-  .stripe{border-radius:50%;position:relative;overflow:hidden}
-  .stripe::after{content:'';position:absolute;left:0;right:0;top:42%;height:16%;background:#fff;opacity:0.92}
-  .notice{color:var(--muted);font-size:13px;margin-top:6px}
+:root{--bg:#0f1113;--panel:#16181a;--muted:#9aa0a6;--accent:#2a9df4}
+html,body{height:100%;margin:0;background:var(--bg);color:#eee;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto}
+.container{padding:12px;display:flex;flex-direction:column;align-items:center;gap:12px}
+.top{display:flex;gap:8px;align-items:center}
+input,button,select{padding:8px;border-radius:8px;border:0;background:var(--panel);color:#eee}
+button{background:var(--accent);cursor:pointer}
+.layout{display:flex;gap:12px;align-items:flex-start}
+canvas{background:#01361f;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,0.6)}
+.panel{width:260px;background:var(--panel);padding:12px;border-radius:8px;max-height:640px;overflow:auto}
+.small{font-size:13px;color:var(--muted)}
+.players .current{color:var(--accent);font-weight:700}
+.server-list{display:flex;flex-direction:column;gap:6px}
+.server-item{display:flex;justify-content:space-between;align-items:center;padding:8px;background:#0b0c0d;border-radius:6px}
+.notice{margin-top:8px;color:var(--muted);font-size:13px}
 </style>
 </head>
 <body>
-<div class="top">
-  <input id="username" placeholder="username" />
-  <button id="create">Create</button>
-  <input id="room" placeholder="ROOM" style="text-transform:uppercase" />
-  <button id="join">Join</button>
-  <div id="status" style="margin-left:12px;color:#ccc">disconnected</div>
-</div>
+<div class="container">
+  <div class="top">
+    <input id="username" placeholder="username" />
+    <button id="create">Create</button>
+    <input id="room" placeholder="ROOM" style="text-transform:uppercase" />
+    <button id="join">Join</button>
+    <div id="status" class="small">disconnected</div>
+  </div>
 
-<div id="container">
-  <canvas id="table" width="800" height="400"></canvas>
+  <div style="width:100%;max-width:1100px" class="layout">
+    <canvas id="table" width="800" height="400"></canvas>
 
-  <div class="panel">
-    <div><strong>Players</strong></div>
-    <div id="players" class="players"></div>
-    <hr />
-    <div><strong>Pocketed</strong></div>
-    <div id="pocketed" class="pocketed"></div>
-    <hr />
-    <div><strong>Chat</strong></div>
-    <div id="chatbox" style="height:180px;overflow:auto;margin-bottom:6px"></div>
-    <input id="chat" placeholder="message" />
-    <div class="notice" id="notice">Not in a room</div>
+    <div class="panel">
+      <div><strong>Server browser</strong></div>
+      <div id="serverBrowser" class="server-list small"></div>
+      <div class="notice">Only 2 players per room. Hosts cannot join other rooms.</div>
+      <hr />
+      <div><strong>Players</strong></div>
+      <div id="players" class="players small"></div>
+      <hr />
+      <div><strong>Pocketed</strong></div>
+      <div id="pocketed" class="small" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+      <hr />
+      <div><strong>Chat</strong></div>
+      <div id="chatbox" style="height:150px;overflow:auto;margin-bottom:6px" class="small"></div>
+      <input id="chat" placeholder="message" />
+      <div id="notice" class="notice">Not in a room</div>
+    </div>
   </div>
 </div>
 
 <script>
+/* client with interpolation + server browser + host restrictions */
 const canvas = document.getElementById('table');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
@@ -54,240 +62,271 @@ const playersEl = document.getElementById('players');
 const pocketedEl = document.getElementById('pocketed');
 const chatBox = document.getElementById('chatbox');
 const noticeEl = document.getElementById('notice');
+const serverBrowser = document.getElementById('serverBrowser');
 
 let ws = null;
 let myId = null;
 let roomState = null;
-let roomCode = null;
+let lastServerState = null;
+let prevServerState = null;
+let interpolationStart = 0;
+let interpolationDuration = 100; // ms, adjust based on server BROADCAST_RATE
+let dragging = null;
 let username = '';
 
-function status(s){ statusEl.textContent = s; }
-function connectToServer(){
-  if(ws && (ws.readyState === 1||ws.readyState===0)) return;
-  ws = new WebSocket(window.location.origin.replace(/^http/, 'ws'));
-  ws.onopen = ()=> status('connected');
-  ws.onclose = ()=> status('disconnected');
+function setStatus(s){ statusEl.textContent = s; }
+function fetchRooms(){ fetch('/rooms').then(r=>r.json()).then(list=> renderServers(list)).catch(()=>{}); }
+function renderServers(list){
+  serverBrowser.innerHTML = '';
+  if(!list.length) { serverBrowser.innerHTML = '<div class="small">No active rooms</div>'; return; }
+  list.forEach(r => {
+    const div = document.createElement('div'); div.className='server-item';
+    div.innerHTML = `<div>${r.code} (${r.players}/2)</div><div><button data-code="${r.code}">Join</button></div>`;
+    const btn = div.querySelector('button');
+    btn.onclick = ()=>{ document.getElementById('room').value = r.code; document.getElementById('join').click(); };
+    serverBrowser.appendChild(div);
+  });
+}
+
+fetchRooms();
+setInterval(fetchRooms, 4000);
+
+/* connect */
+function connect() {
+  if (ws && (ws.readyState === 1 || ws.readyState === 0)) return;
+  const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
+  ws = new WebSocket(proto + '://' + location.host);
+  ws.onopen = ()=> setStatus('connected');
+  ws.onclose = ()=> setStatus('disconnected');
   ws.onmessage = ev => {
-    const m = JSON.parse(ev.data);
-    if(m.t === 'joined'){ roomCode = m.code; myId = m.id; status('in room ' + roomCode); noticeEl.textContent = 'In room ' + roomCode; }
-    else if(m.t === 'state'){ roomState = m.state; renderUI(); }
-    else if(m.t === 'chat'){ addChat(m.from + ': ' + m.msg); }
-    else if(m.t === 'assigned'){ addChat('SYSTEM: ' + m.playerId + ' assigned ' + m.group); }
-    else if(m.t === 'game_over'){ addChat('GAME OVER: ' + (m.winner || 'Unknown') + ' — ' + m.reason); noticeEl.textContent = 'Game over: ' + (m.reason || ''); }
-    else if(m.t === 'error'){ addChat('ERROR: ' + (m.msg || '')); }
+    const msg = JSON.parse(ev.data);
+    // serverTime is provided; use it for interpolation if available
+    if (msg.t === 'joined') { myId = msg.id; setStatus('in room ' + msg.code); noticeEl.textContent = 'In room ' + msg.code; }
+    else if (msg.t === 'state') {
+      // move prev->last payloads for interpolation
+      prevServerState = lastServerState;
+      lastServerState = msg;
+      interpolationStart = Date.now();
+      interpolationDuration = 1000 / 20 * 0.9; // based on broadcast rate ~20Hz
+      roomState = msg.state; // fallback immediate
+      renderPlayersAndPocketed();
+    } else if (msg.t === 'chat') { addChat(msg.from + ': ' + msg.msg); }
+    else if (msg.t === 'assigned') { addChat('SYSTEM: assignment set for ' + msg.playerId + ' -> ' + msg.group); }
+    else if (msg.t === 'foul') { addChat('FOUL: ' + (msg.msg || '')); }
+    else if (msg.t === 'game_over') { addChat('GAME OVER: ' + (msg.winner || '') + ' — ' + (msg.reason || '')); }
+    else if (msg.t === 'error') { addChat('ERROR: ' + (msg.msg || '')); }
   };
 }
 
-document.getElementById('create').onclick = ()=>{
-  username = (document.getElementById('username').value || 'Player').trim();
-  connectToServer();
-  if(ws.readyState === 1) ws.send(JSON.stringify({ t:'create', name: username }));
-  else ws.addEventListener('open', ()=> ws.send(JSON.stringify({ t:'create', name: username })), { once: true });
+/* UI actions */
+document.getElementById('create').onclick = () => {
+  username = (document.getElementById('username').value || 'Host').trim();
+  connect();
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'create', name: username }));
+  else ws.addEventListener('open', ()=> ws.send(JSON.stringify({ t:'create', name: username })), { once:true });
 };
-document.getElementById('join').onclick = ()=>{
+document.getElementById('join').onclick = () => {
   username = (document.getElementById('username').value || 'Player').trim();
   const code = (document.getElementById('room').value || '').trim().toUpperCase();
-  if(!code) return;
-  connectToServer();
-  if(ws.readyState === 1) ws.send(JSON.stringify({ t:'join', code, name: username }));
-  else ws.addEventListener('open', ()=> ws.send(JSON.stringify({ t:'join', code, name: username })), { once: true });
+  if (!code) return;
+  connect();
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'join', code, name: username }));
+  else ws.addEventListener('open', ()=> ws.send(JSON.stringify({ t:'join', code, name: username })), { once:true });
 };
-
 document.getElementById('chat').addEventListener('keydown', e=>{
-  if(e.key === 'Enter' && ws && ws.readyState === 1){
-    const txt = e.target.value.trim();
-    if(!txt) return;
-    ws.send(JSON.stringify({ t:'chat', msg: txt }));
-    e.target.value = '';
+  if (e.key === 'Enter' && ws && ws.readyState === 1) {
+    const t = e.target.value.trim(); if (!t) return;
+    ws.send(JSON.stringify({ t:'chat', msg: t })); e.target.value = '';
   }
 });
 
-function addChat(s){
-  const d = document.createElement('div');
-  d.textContent = s;
-  chatBox.appendChild(d);
-  chatBox.scrollTop = chatBox.scrollHeight;
+/* chat */
+function addChat(s){ const d = document.createElement('div'); d.textContent = s; chatBox.appendChild(d); chatBox.scrollTop = chatBox.scrollHeight; }
+
+/* render helpers */
+function renderPlayersAndPocketed(){
+  if (!lastServerState) return;
+  roomState = lastServerState.state;
+  // players
+  playersEl.innerHTML = '';
+  (roomState.players||[]).forEach(p => {
+    const d = document.createElement('div');
+    d.textContent = (p.name||p.id) + (p.group ? ' ('+p.group+')' : '');
+    if (roomState.turn === p.id) d.className = 'current';
+    playersEl.appendChild(d);
+  });
+  // pocketed
+  pocketedEl.innerHTML = '';
+  (roomState.pocketed||[]).forEach(n => {
+    const s = document.createElement('div'); s.style.width='28px'; s.style.height='28px'; s.style.borderRadius='50%'; s.style.background='#fff'; s.style.display='inline-block'; s.style.margin='2px';
+    pocketedEl.appendChild(s);
+  });
 }
 
-/* drawing helpers */
+/* interpolation: get interpolated balls */
+function getInterpolatedState() {
+  if (!prevServerState || !lastServerState) return roomState;
+  const a = prevServerState;
+  const b = lastServerState;
+  const now = Date.now();
+  const t0 = a.serverTime || 0;
+  const t1 = b.serverTime || 0;
+  const span = Math.max(1, t1 - t0);
+  const alpha = Math.min(1, Math.max(0, (now - t1 + interpolationDuration) / interpolationDuration ));
+  // map balls by id
+  const mapA = new Map((a.state.balls||[]).map(x=>[x.id,x]));
+  const mapB = new Map((b.state.balls||[]).map(x=>[x.id,x]));
+  const outBalls = [];
+  // use B list as baseline
+  for (const be of (b.state.balls||[])) {
+    const ae = mapA.get(be.id);
+    if (!ae) { outBalls.push(be); continue; }
+    // lerp positions
+    const x = ae.x + (be.x - ae.x) * alpha;
+    const y = ae.y + (be.y - ae.y) * alpha;
+    const vx = ae.vx + (be.vx - ae.vx) * alpha;
+    const vy = ae.vy + (be.vy - ae.vy) * alpha;
+    outBalls.push(Object.assign({}, be, { x, y, vx, vy }));
+  }
+  // keep pocketed and players from latest
+  const out = Object.assign({}, b.state, { balls: outBalls });
+  return out;
+}
+
+/* drawing */
 function drawTable(){
-  // green felt background (canvas already set)
   ctx.fillStyle = '#01361f';
-  ctx.fillRect(0,0,800,400);
-  // draw pockets
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  // pockets
   ctx.fillStyle = '#000';
-  const pockets = [{x:0,y:0},{x:400,y:0},{x:800,y:0},{x:0,y:400},{x:400,y:400},{x:800,y:400}];
-  pockets.forEach(p => {
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 24, 0, Math.PI*2);
-    ctx.fill();
+  [[0,0],[400,0],[800,0],[0,400],[400,400],[800,400]].forEach(p=>{
+    ctx.beginPath(); ctx.arc(p[0], p[1], 24, 0, Math.PI*2); ctx.fill();
   });
 }
 
 function drawBall(b){
   const x = b.x, y = b.y, r = b.r || 10;
-  if(b.stripe){
-    // white ring
-    ctx.beginPath();
-    ctx.arc(x,y,r,0,Math.PI*2);
-    ctx.fillStyle = '#fff';
-    ctx.fill();
-    // colored inner circle smaller so it looks like stripe
-    ctx.beginPath();
-    ctx.arc(x,y,r*0.66,0,Math.PI*2);
-    ctx.fillStyle = b.color || '#ccc';
-    ctx.fill();
+  if (b.stripe) {
+    // white base
+    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle = '#fff'; ctx.fill();
+    // colored smaller center
+    ctx.beginPath(); ctx.arc(x,y,r*0.66,0,Math.PI*2); ctx.fillStyle = b.color || '#ddd'; ctx.fill();
   } else {
-    ctx.beginPath();
-    ctx.arc(x,y,r,0,Math.PI*2);
-    ctx.fillStyle = b.color || '#ccc';
-    ctx.fill();
+    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle = b.color || '#ddd'; ctx.fill();
   }
-  // outline
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = '#222';
-  ctx.stroke();
-
-  // number
-  if(b.num !== 0){
-    ctx.fillStyle = '#000';
-    ctx.font = '10px system-ui';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
+  ctx.lineWidth = 1; ctx.strokeStyle = '#222'; ctx.stroke();
+  if (b.num !== 0) {
+    ctx.fillStyle = '#000'; ctx.font = '10px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle';
     ctx.fillText(String(b.num), x, y);
   }
 }
 
-/* aim preview and input */
-let dragging = null;
+/* input: aiming & shooting */
 canvas.addEventListener('mousedown', e=>{
-  if(!roomState) return;
-  if(!roomState.turn || roomState.turn !== myId) return;
-  if(!roomState.ballInHand && !allBallsStopped()) return;
-  // if ballInHand is true then clicking places cue ball
+  if (!roomState || !lastServerState) return;
+  if (!roomState.turn || roomState.turn !== myId) return;
+  if (!roomState.ballInHand && !(lastServerState && lastServerState.t && lastServerState.t === 'state' && lastServerState.state && lastServerState.state.balls && lastServerState.state.balls.every(b=>Math.hypot(b.vx||0,b.vy||0)<0.02))) return;
   const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
-  const my = e.clientY - rect.top;
-  if(roomState.ballInHand){
-    // send place_cue (server expects place_cue with x,y)
-    if(ws && ws.readyState === 1){
-      ws.send(JSON.stringify({ t:'place_cue', x: mx, y: my }));
-    }
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  if (roomState.ballInHand) {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'place_cue', x: mx, y: my }));
     return;
   }
-  // start aiming
-  const cue = roomState.balls.find(b => b.id === 'cue');
-  if(!cue) return;
+  const cue = (lastServerState && lastServerState.state && lastServerState.state.balls) ? lastServerState.state.balls.find(b=>b.id==='cue') : null;
+  if (!cue) return;
   dragging = { cx: cue.x, cy: cue.y, mx, my };
 });
 canvas.addEventListener('mousemove', e=>{
-  if(!dragging) return;
+  if (!dragging) return;
   const rect = canvas.getBoundingClientRect();
-  dragging.mx = e.clientX - rect.left;
-  dragging.my = e.clientY - rect.top;
+  dragging.mx = e.clientX - rect.left; dragging.my = e.clientY - rect.top;
 });
 window.addEventListener('mouseup', e=>{
-  if(!dragging) return;
-  // send shoot
-  const dx = dragging.cx - dragging.mx;
-  const dy = dragging.cy - dragging.my;
+  if (!dragging) return;
+  const dx = dragging.cx - dragging.mx, dy = dragging.cy - dragging.my;
   const dist = Math.hypot(dx, dy);
   const power = Math.min(1, dist / 180);
   const angle = Math.atan2(dy, dx) + Math.PI;
-  if(ws && ws.readyState === 1){
-    ws.send(JSON.stringify({ t:'shoot', power, angle }));
-  }
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'shoot', power, angle }));
   dragging = null;
 });
 
-/* utilities */
-function allBallsStopped(){
-  if(!roomState) return true;
-  return roomState.balls.every(b => Math.hypot(b.vx || 0, b.vy || 0) < 0.06);
-}
-
-/* rendering loop */
-function render(){
+/* main render loop (60fps) */
+function render() {
   drawTable();
-  if(roomState){
-    // balls
-    roomState.balls.forEach(b => drawBall(b));
-    // pocketed display
-    pocketedEl.innerHTML = '';
-    if(roomState.pocketed && roomState.pocketed.length){
-      roomState.pocketed.forEach(n => {
-        if(n === 0) return; // cue not shown here
-        const span = document.createElement('div');
-        span.className = 'ball-swatch' + (n >= 9 ? ' stripe' : '');
-        span.style.background = '#fff';
-        // inner colored circle for solids and stripes: create child circle
-        const inner = document.createElement('div');
-        inner.style.width = '18px';
-        inner.style.height = '18px';
-        inner.style.borderRadius = '50%';
-        inner.style.margin = '0 auto';
-        inner.style.marginTop = '4px';
-        // color mapping simple:
-        const map = {1:'#FFD400',2:'#0047AB',3:'#C41E3A',4:'#6A0DAD',5:'#FF8C00',6:'#006400',7:'#6F1D1B',
-                      9:'#FFD400',10:'#0047AB',11:'#C41E3A',12:'#6A0DAD',13:'#FF8C00',14:'#006400',15:'#6F1D1B'};
-        inner.style.background = map[n] || '#ddd';
-        span.appendChild(inner);
-        pocketedEl.appendChild(span);
-      });
-    }
-
-    // players
-    playersEl.innerHTML = '';
-    roomState.players.forEach(p => {
-      const div = document.createElement('div');
-      div.textContent = (p.name || p.id) + (p.group ? ' (' + p.group + ')' : '');
-      if(roomState.turn === p.id) div.className = 'current';
-      playersEl.appendChild(div);
-    });
-
-    // notices
-    if(roomState.ballInHand){
-      noticeEl.textContent = 'Ball-in-hand: place the cue ball (click table)';
-    } else if(!allBallsStopped()){
-      noticeEl.textContent = 'Balls moving...';
-    } else if(roomState.turn === myId){
-      noticeEl.textContent = 'Your turn. Click-drag to shoot.';
-    } else {
-      const p = roomState.players.find(pp => pp.id === roomState.turn);
-      noticeEl.textContent = p ? `Waiting for ${p.name}` : 'Waiting...';
-    }
-
-    // draw aiming line preview
-    if(dragging){
+  const s = getInterpolatedState() || (lastServerState ? lastServerState.state : null);
+  if (s && s.balls) {
+    s.balls.forEach(b => drawBall(b));
+    // draw aim preview
+    if (dragging) {
       const cx = dragging.cx, cy = dragging.cy, mx = dragging.mx, my = dragging.my;
-      const dx = mx - cx, dy = my - cy;
-      const angle = Math.atan2(dy, dx);
-      const len = 80;
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(cx + Math.cos(angle) * len, cy + Math.sin(angle) * len);
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 2;
-      ctx.stroke();
+      const angle = Math.atan2(my - cy, mx - cx);
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(angle) * 80, cy + Math.sin(angle) * 80);
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
     }
-
-    // show last event
-    if(roomState.lastEvent){
-      // display briefly in chat
-      addChat('EVENT: ' + JSON.stringify(roomState.lastEvent));
-    }
-  } else {
-    playersEl.innerHTML = '';
-    pocketedEl.innerHTML = '';
-    noticeEl.textContent = 'Not in a room';
+    // update UI
+    roomState = s;
+    renderPlayers();
   }
-
   requestAnimationFrame(render);
 }
 
-/* request state periodically */
-setInterval(()=>{ if(ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'request_state' })); }, 1000);
+function renderPlayers(){
+  if (!roomState) return;
+  playersEl.innerHTML = '';
+  (roomState.players||[]).forEach(p => {
+    const div = document.createElement('div');
+    div.textContent = (p.name || p.id) + (p.group ? ' ('+p.group+')' : '');
+    if (roomState.turn === p.id) div.className = 'current';
+    playersEl.appendChild(div);
+  });
+  // pocketed (simple)
+  pocketedEl.innerHTML = '';
+  (roomState.pocketed||[]).forEach(n => {
+    const el = document.createElement('div'); el.style.width='18px'; el.style.height='18px'; el.style.borderRadius='50%'; el.style.background='#fff'; el.style.margin='2px';
+    pocketedEl.appendChild(el);
+  });
+  // notice text
+  if (roomState.ballInHand) noticeEl.textContent = 'Ball-in-hand: place cue.';
+  else {
+    const moving = (roomState.balls||[]).some(b=>Math.hypot(b.vx||0,b.vy||0) > 0.02);
+    if (moving) noticeEl.textContent = 'Balls moving...';
+    else if (roomState.turn === myId) noticeEl.textContent = 'Your turn.';
+    else {
+      const p = (roomState.players||[]).find(pp=>pp.id === roomState.turn);
+      noticeEl.textContent = p ? `Waiting for ${p.name}` : 'Waiting...';
+    }
+  }
+}
 
+function getInterpolatedState() {
+  if (!prevServerState || !lastServerState) return lastServerState ? lastServerState.state : null;
+  const a = prevServerState, b = lastServerState;
+  const now = Date.now();
+  const t0 = a.serverTime || 0;
+  const t1 = b.serverTime || 0;
+  const target = t1 + interpolationDuration;
+  const alpha = (now - t1) / interpolationDuration;
+  const clamped = Math.max(0, Math.min(1, alpha));
+  const mapA = new Map((a.state.balls||[]).map(x=>[x.id,x]));
+  const out = { balls: [] };
+  for (const be of (b.state.balls||[])) {
+    const ae = mapA.get(be.id);
+    if (!ae) { out.balls.push(be); continue; }
+    const x = ae.x + (be.x - ae.x) * clamped;
+    const y = ae.y + (be.y - ae.y) * clamped;
+    const vx = ae.vx + (be.vx - ae.vx) * clamped;
+    const vy = ae.vy + (be.vy - ae.vy) * clamped;
+    out.balls.push(Object.assign({}, be, { x, y, vx, vy }));
+  }
+  out.players = b.state.players; out.pocketed = b.state.pocketed; out.turn = b.state.turn; out.ballInHand = b.state.ballInHand; out.lastEvent = b.state.lastEvent;
+  return out;
+}
+
+/* auto request server state periodically */
+setInterval(()=>{ if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'request_state' })); }, 1200);
+
+/* start animation */
 render();
 </script>
 </body>
