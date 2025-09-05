@@ -16,7 +16,7 @@ const TABLE_H = 400;
 const BALL_R = 10;
 const POCKET_RADIUS = 24;
 const TICK_RATE = 60;
-const FRICTION = 0.987;
+const FRICTION = 0.99;
 const SHOOT_SCALE = 14; // power -> initial velocity
 const STOP_THRESH = 0.06; // below this considered stopped
 
@@ -433,3 +433,4 @@ wss.on('connection', ws => {
     else broadcastRoomState(room);
   });
 });
+
