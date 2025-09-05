@@ -2,23 +2,28 @@
 <html>
 <head>
 <meta charset="utf-8" />
-<title>Pool — improved client</title>
+<title>Pool — polished client</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <style>
-:root{--bg:#0f1113;--panel:#16181a;--muted:#9aa0a6;--accent:#2a9df4}
+:root{
+  --bg:#0f1113; --panel:#16181a; --muted:#9aa0a6; --accent:#2a9df4;
+  --felt-1: #0b3c22; --felt-2: #0c4a2b;
+}
 html,body{height:100%;margin:0;background:var(--bg);color:#eee;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto}
 .container{padding:12px;display:flex;flex-direction:column;align-items:center;gap:12px}
 .top{display:flex;gap:8px;align-items:center}
-input,button,select{padding:8px;border-radius:8px;border:0;background:var(--panel);color:#eee}
+input,button,select{padding:8px;border-radius:10px;border:0;background:var(--panel);color:#eee;outline:none}
 button{background:var(--accent);cursor:pointer}
 .layout{display:flex;gap:12px;align-items:flex-start}
-canvas{background:#01361f;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,0.6)}
-.panel{width:260px;background:var(--panel);padding:12px;border-radius:8px;max-height:640px;overflow:auto}
+canvas{background:transparent;border-radius:10px;box-shadow:0 18px 50px rgba(0,0,0,0.6)}
+.panel{width:300px;background:linear-gradient(180deg,#111214,#141618);padding:14px;border-radius:12px;max-height:720px;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,0.6)}
 .small{font-size:13px;color:var(--muted)}
 .players .current{color:var(--accent);font-weight:700}
 .server-list{display:flex;flex-direction:column;gap:6px}
-.server-item{display:flex;justify-content:space-between;align-items:center;padding:8px;background:#0b0c0d;border-radius:6px}
+.server-item{display:flex;justify-content:space-between;align-items:center;padding:8px;background:rgba(255,255,255,0.02);border-radius:8px}
 .notice{margin-top:8px;color:var(--muted);font-size:13px}
+.pocket-grid{display:flex;flex-wrap:wrap;gap:6px}
+.pocket-swatch{width:34px;height:34px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px}
 </style>
 </head>
 <body>
@@ -31,22 +36,26 @@ canvas{background:#01361f;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,0.
     <div id="status" class="small">disconnected</div>
   </div>
 
-  <div style="width:100%;max-width:1100px" class="layout">
-    <canvas id="table" width="800" height="400"></canvas>
+  <div style="width:100%;max-width:1180px" class="layout">
+    <div style="position:relative">
+      <canvas id="table" width="800" height="400"></canvas>
+      <!-- subtle table vignette overlay -->
+      <canvas id="overlay" width="800" height="400" style="position:absolute;left:0;top:0;pointer-events:none"></canvas>
+    </div>
 
     <div class="panel">
       <div><strong>Server browser</strong></div>
       <div id="serverBrowser" class="server-list small"></div>
       <div class="notice">Only 2 players per room. Hosts cannot join other rooms.</div>
-      <hr />
+      <hr style="margin:10px 0;border:none;border-top:1px solid rgba(255,255,255,0.03)" />
       <div><strong>Players</strong></div>
       <div id="players" class="players small"></div>
-      <hr />
+      <hr style="margin:10px 0;border:none;border-top:1px solid rgba(255,255,255,0.03)" />
       <div><strong>Pocketed</strong></div>
-      <div id="pocketed" class="small" style="display:flex;gap:6px;flex-wrap:wrap"></div>
-      <hr />
+      <div id="pocketed" class="pocket-grid small" style="margin-top:8px"></div>
+      <hr style="margin:10px 0;border:none;border-top:1px solid rgba(255,255,255,0.03)" />
       <div><strong>Chat</strong></div>
-      <div id="chatbox" style="height:150px;overflow:auto;margin-bottom:6px" class="small"></div>
+      <div id="chatbox" style="height:140px;overflow:auto;margin-bottom:6px" class="small"></div>
       <input id="chat" placeholder="message" />
       <div id="notice" class="notice">Not in a room</div>
     </div>
@@ -54,9 +63,11 @@ canvas{background:#01361f;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,0.
 </div>
 
 <script>
-/* client with interpolation + server browser + host restrictions */
+/* networking/UI preserved from previous client */
 const canvas = document.getElementById('table');
 const ctx = canvas.getContext('2d');
+const overlay = document.getElementById('overlay');
+const octx = overlay.getContext('2d');
 const statusEl = document.getElementById('status');
 const playersEl = document.getElementById('players');
 const pocketedEl = document.getElementById('pocketed');
@@ -64,270 +75,363 @@ const chatBox = document.getElementById('chatbox');
 const noticeEl = document.getElementById('notice');
 const serverBrowser = document.getElementById('serverBrowser');
 
-let ws = null;
-let myId = null;
-let roomState = null;
-let lastServerState = null;
-let prevServerState = null;
-let interpolationStart = 0;
-let interpolationDuration = 100; // ms, adjust based on server BROADCAST_RATE
-let dragging = null;
-let username = '';
+let ws = null, myId = null;
+let lastServerState = null, prevServerState = null, interpolationStart = 0, interpolationDuration = 120;
+let dragging = null, username = '';
+
+const PALETTE = {
+ 1:'#FFD400',2:'#0047AB',3:'#C41E3A',4:'#6A0DAD',5:'#FF8C00',6:'#006400',7:'#6F1D1B',
+ 8:'#000000',9:'#FFD400',10:'#0047AB',11:'#C41E3A',12:'#6A0DAD',13:'#FF8C00',14:'#006400',15:'#6F1D1B'
+};
 
 function setStatus(s){ statusEl.textContent = s; }
-function fetchRooms(){ fetch('/rooms').then(r=>r.json()).then(list=> renderServers(list)).catch(()=>{}); }
+function fetchRooms(){ fetch('/rooms').then(r=>r.json()).then(renderServers).catch(()=>{}); }
 function renderServers(list){
   serverBrowser.innerHTML = '';
   if(!list.length) { serverBrowser.innerHTML = '<div class="small">No active rooms</div>'; return; }
   list.forEach(r => {
     const div = document.createElement('div'); div.className='server-item';
-    div.innerHTML = `<div>${r.code} (${r.players}/2)</div><div><button data-code="${r.code}">Join</button></div>`;
+    div.innerHTML = `<div>${r.code} (${r.players}/2) ${r.host?'- '+r.host:''}</div><div><button data-code="${r.code}">Join</button></div>`;
     const btn = div.querySelector('button');
     btn.onclick = ()=>{ document.getElementById('room').value = r.code; document.getElementById('join').click(); };
     serverBrowser.appendChild(div);
   });
 }
+fetchRooms(); setInterval(fetchRooms, 4000);
 
-fetchRooms();
-setInterval(fetchRooms, 4000);
-
-/* connect */
-function connect() {
-  if (ws && (ws.readyState === 1 || ws.readyState === 0)) return;
-  const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
+function connect(){
+  if(ws && (ws.readyState===1||ws.readyState===0)) return;
+  const proto = (location.protocol==='https:') ? 'wss' : 'ws';
   ws = new WebSocket(proto + '://' + location.host);
   ws.onopen = ()=> setStatus('connected');
   ws.onclose = ()=> setStatus('disconnected');
   ws.onmessage = ev => {
     const msg = JSON.parse(ev.data);
-    // serverTime is provided; use it for interpolation if available
-    if (msg.t === 'joined') { myId = msg.id; setStatus('in room ' + msg.code); noticeEl.textContent = 'In room ' + msg.code; }
-    else if (msg.t === 'state') {
-      // move prev->last payloads for interpolation
-      prevServerState = lastServerState;
-      lastServerState = msg;
-      interpolationStart = Date.now();
-      interpolationDuration = 1000 / 20 * 0.9; // based on broadcast rate ~20Hz
-      roomState = msg.state; // fallback immediate
-      renderPlayersAndPocketed();
-    } else if (msg.t === 'chat') { addChat(msg.from + ': ' + msg.msg); }
-    else if (msg.t === 'assigned') { addChat('SYSTEM: assignment set for ' + msg.playerId + ' -> ' + msg.group); }
-    else if (msg.t === 'foul') { addChat('FOUL: ' + (msg.msg || '')); }
-    else if (msg.t === 'game_over') { addChat('GAME OVER: ' + (msg.winner || '') + ' — ' + (msg.reason || '')); }
-    else if (msg.t === 'error') { addChat('ERROR: ' + (msg.msg || '')); }
+    if(msg.t === 'joined'){ myId = msg.id; setStatus('in room ' + msg.code); noticeEl.textContent = 'In room ' + msg.code; }
+    else if(msg.t === 'state'){ prevServerState = lastServerState; lastServerState = msg; interpolationStart = Date.now(); interpolationDuration = 1000/20*0.95; renderPlayersAndPocketed(msg.state); }
+    else if(msg.t === 'chat') addChat(msg.from + ': ' + msg.msg);
+    else if(msg.t === 'assigned') addChat('SYSTEM: assignment set for ' + msg.playerId + ' -> ' + msg.group);
+    else if(msg.t === 'foul') addChat('FOUL: ' + (msg.msg || ''));
+    else if(msg.t === 'game_over') addChat('GAME OVER: ' + (msg.winner || '') + ' — ' + (msg.reason || ''));
+    else if(msg.t === 'error') addChat('ERROR: ' + (msg.msg || ''));
   };
 }
 
 /* UI actions */
-document.getElementById('create').onclick = () => {
+document.getElementById('create').onclick = ()=>{
   username = (document.getElementById('username').value || 'Host').trim();
   connect();
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'create', name: username }));
+  if(ws.readyState===1) ws.send(JSON.stringify({ t:'create', name: username }));
   else ws.addEventListener('open', ()=> ws.send(JSON.stringify({ t:'create', name: username })), { once:true });
 };
-document.getElementById('join').onclick = () => {
+document.getElementById('join').onclick = ()=>{
   username = (document.getElementById('username').value || 'Player').trim();
   const code = (document.getElementById('room').value || '').trim().toUpperCase();
-  if (!code) return;
+  if(!code) return;
   connect();
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'join', code, name: username }));
+  if(ws.readyState===1) ws.send(JSON.stringify({ t:'join', code, name: username }));
   else ws.addEventListener('open', ()=> ws.send(JSON.stringify({ t:'join', code, name: username })), { once:true });
 };
 document.getElementById('chat').addEventListener('keydown', e=>{
-  if (e.key === 'Enter' && ws && ws.readyState === 1) {
-    const t = e.target.value.trim(); if (!t) return;
+  if(e.key === 'Enter' && ws && ws.readyState===1){
+    const t = e.target.value.trim(); if(!t) return;
     ws.send(JSON.stringify({ t:'chat', msg: t })); e.target.value = '';
   }
 });
+function addChat(s){ const d=document.createElement('div'); d.textContent = s; chatBox.appendChild(d); chatBox.scrollTop = chatBox.scrollHeight; }
 
-/* chat */
-function addChat(s){ const d = document.createElement('div'); d.textContent = s; chatBox.appendChild(d); chatBox.scrollTop = chatBox.scrollHeight; }
-
-/* render helpers */
-function renderPlayersAndPocketed(){
-  if (!lastServerState) return;
-  roomState = lastServerState.state;
-  // players
-  playersEl.innerHTML = '';
-  (roomState.players||[]).forEach(p => {
-    const d = document.createElement('div');
-    d.textContent = (p.name||p.id) + (p.group ? ' ('+p.group+')' : '');
-    if (roomState.turn === p.id) d.className = 'current';
-    playersEl.appendChild(d);
-  });
-  // pocketed
-  pocketedEl.innerHTML = '';
-  (roomState.pocketed||[]).forEach(n => {
-    const s = document.createElement('div'); s.style.width='28px'; s.style.height='28px'; s.style.borderRadius='50%'; s.style.background='#fff'; s.style.display='inline-block'; s.style.margin='2px';
-    pocketedEl.appendChild(s);
-  });
-}
-
-/* interpolation: get interpolated balls */
-function getInterpolatedState() {
-  if (!prevServerState || !lastServerState) return roomState;
-  const a = prevServerState;
-  const b = lastServerState;
-  const now = Date.now();
-  const t0 = a.serverTime || 0;
-  const t1 = b.serverTime || 0;
-  const span = Math.max(1, t1 - t0);
-  const alpha = Math.min(1, Math.max(0, (now - t1 + interpolationDuration) / interpolationDuration ));
-  // map balls by id
-  const mapA = new Map((a.state.balls||[]).map(x=>[x.id,x]));
-  const mapB = new Map((b.state.balls||[]).map(x=>[x.id,x]));
-  const outBalls = [];
-  // use B list as baseline
-  for (const be of (b.state.balls||[])) {
-    const ae = mapA.get(be.id);
-    if (!ae) { outBalls.push(be); continue; }
-    // lerp positions
-    const x = ae.x + (be.x - ae.x) * alpha;
-    const y = ae.y + (be.y - ae.y) * alpha;
-    const vx = ae.vx + (be.vx - ae.vx) * alpha;
-    const vy = ae.vy + (be.vy - ae.vy) * alpha;
-    outBalls.push(Object.assign({}, be, { x, y, vx, vy }));
-  }
-  // keep pocketed and players from latest
-  const out = Object.assign({}, b.state, { balls: outBalls });
-  return out;
-}
-
-/* drawing */
-function drawTable(){
-  ctx.fillStyle = '#01361f';
+/* rendering: table styling + improved ball shading + pocketed swatches */
+function drawTableBackground(){
+  // gradient felt
+  const g = ctx.createLinearGradient(0,0,0,canvas.height);
+  g.addColorStop(0, 'rgba(8,60,35,1)');
+  g.addColorStop(1, 'rgba(7,75,45,1)');
+  ctx.fillStyle = g;
   ctx.fillRect(0,0,canvas.width,canvas.height);
-  // pockets
+
+  // inner bevel
+  ctx.save();
+  ctx.globalCompositeOperation = 'overlay';
+  const vg = ctx.createLinearGradient(0,0,0,canvas.height);
+  vg.addColorStop(0, 'rgba(0,0,0,0.22)');
+  vg.addColorStop(0.5, 'rgba(255,255,255,0.02)');
+  vg.addColorStop(1, 'rgba(0,0,0,0.3)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.restore();
+
+  // pockets shadow rims
   ctx.fillStyle = '#000';
   [[0,0],[400,0],[800,0],[0,400],[400,400],[800,400]].forEach(p=>{
-    ctx.beginPath(); ctx.arc(p[0], p[1], 24, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath();
+    ctx.arc(p[0], p[1], 26, 0, Math.PI*2);
+    ctx.fill();
+    // inner rim
+    ctx.beginPath();
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+    ctx.lineWidth = 3;
+    ctx.arc(p[0], p[1], 20, 0, Math.PI*2);
+    ctx.stroke();
   });
 }
 
+/* improved ball draw: gradient + subtle cast shadow + highlight + number badge */
 function drawBall(b){
   const x = b.x, y = b.y, r = b.r || 10;
+
+  // drop shadow
+  ctx.beginPath();
+  ctx.ellipse(x+3, y+5, r*0.95, r*0.6, 0, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fill();
+
+  // ball body gradient
+  const grad = ctx.createRadialGradient(x - r*0.3, y - r*0.5, r*0.1, x, y, r*1.1);
+  // base color area
+  const base = b.color || '#ddd';
   if (b.stripe) {
-    // white base
-    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle = '#fff'; ctx.fill();
-    // colored smaller center
-    ctx.beginPath(); ctx.arc(x,y,r*0.66,0,Math.PI*2); ctx.fillStyle = b.color || '#ddd'; ctx.fill();
+    // draw white base circle first to create stripe effect
+    ctx.beginPath();
+    ctx.arc(x,y,r,0,Math.PI*2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+    // colored inner circle
+    const innerR = r * 0.66;
+    const g2 = ctx.createRadialGradient(x - innerR*0.3, y - innerR*0.45, innerR*0.1, x, y, innerR*1.1);
+    g2.addColorStop(0, lighten(base, 0.05));
+    g2.addColorStop(1, darken(base, 0.1));
+    ctx.beginPath();
+    ctx.arc(x,y,innerR,0,Math.PI*2);
+    ctx.fillStyle = g2;
+    ctx.fill();
   } else {
-    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle = b.color || '#ddd'; ctx.fill();
+    grad.addColorStop(0, lighten(base, 0.08));
+    grad.addColorStop(0.5, base);
+    grad.addColorStop(1, darken(base, 0.12));
+    ctx.beginPath();
+    ctx.arc(x,y,r,0,Math.PI*2);
+    ctx.fillStyle = grad;
+    ctx.fill();
   }
-  ctx.lineWidth = 1; ctx.strokeStyle = '#222'; ctx.stroke();
+
+  // subtle rim
+  ctx.lineWidth = 1.2;
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+  ctx.stroke();
+
+  // specular highlight
+  ctx.beginPath();
+  ctx.ellipse(x - r*0.35, y - r*0.55, r*0.35, r*0.55, -0.6, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fill();
+
+  // number badge - for solids a white circle; for stripes a small black number on white band
   if (b.num !== 0) {
-    ctx.fillStyle = '#000'; ctx.font = '10px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.fillText(String(b.num), x, y);
-  }
-}
-
-/* input: aiming & shooting */
-canvas.addEventListener('mousedown', e=>{
-  if (!roomState || !lastServerState) return;
-  if (!roomState.turn || roomState.turn !== myId) return;
-  if (!roomState.ballInHand && !(lastServerState && lastServerState.t && lastServerState.t === 'state' && lastServerState.state && lastServerState.state.balls && lastServerState.state.balls.every(b=>Math.hypot(b.vx||0,b.vy||0)<0.02))) return;
-  const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-  if (roomState.ballInHand) {
-    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'place_cue', x: mx, y: my }));
-    return;
-  }
-  const cue = (lastServerState && lastServerState.state && lastServerState.state.balls) ? lastServerState.state.balls.find(b=>b.id==='cue') : null;
-  if (!cue) return;
-  dragging = { cx: cue.x, cy: cue.y, mx, my };
-});
-canvas.addEventListener('mousemove', e=>{
-  if (!dragging) return;
-  const rect = canvas.getBoundingClientRect();
-  dragging.mx = e.clientX - rect.left; dragging.my = e.clientY - rect.top;
-});
-window.addEventListener('mouseup', e=>{
-  if (!dragging) return;
-  const dx = dragging.cx - dragging.mx, dy = dragging.cy - dragging.my;
-  const dist = Math.hypot(dx, dy);
-  const power = Math.min(1, dist / 180);
-  const angle = Math.atan2(dy, dx) + Math.PI;
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'shoot', power, angle }));
-  dragging = null;
-});
-
-/* main render loop (60fps) */
-function render() {
-  drawTable();
-  const s = getInterpolatedState() || (lastServerState ? lastServerState.state : null);
-  if (s && s.balls) {
-    s.balls.forEach(b => drawBall(b));
-    // draw aim preview
-    if (dragging) {
-      const cx = dragging.cx, cy = dragging.cy, mx = dragging.mx, my = dragging.my;
-      const angle = Math.atan2(my - cy, mx - cx);
-      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(angle) * 80, cy + Math.sin(angle) * 80);
-      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+    if (b.stripe) {
+      // white badge
+      ctx.beginPath();
+      ctx.arc(x, y, r*0.38, 0, Math.PI*2);
+      ctx.fillStyle = '#fff';
+      ctx.fill();
+      ctx.fillStyle = '#000';
+      ctx.font = (r*0.6) + 'px system-ui';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(b.num), x, y);
+    } else {
+      ctx.beginPath();
+      ctx.arc(x, y, r*0.42, 0, Math.PI*2);
+      ctx.fillStyle = '#fff';
+      ctx.fill();
+      ctx.fillStyle = '#000';
+      ctx.font = (r*0.6) + 'px system-ui';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(b.num), x, y);
     }
-    // update UI
-    roomState = s;
-    renderPlayers();
   }
-  requestAnimationFrame(render);
 }
 
-function renderPlayers(){
-  if (!roomState) return;
-  playersEl.innerHTML = '';
-  (roomState.players||[]).forEach(p => {
-    const div = document.createElement('div');
-    div.textContent = (p.name || p.id) + (p.group ? ' ('+p.group+')' : '');
-    if (roomState.turn === p.id) div.className = 'current';
-    playersEl.appendChild(div);
-  });
-  // pocketed (simple)
+/* helpers to adjust color brightness */
+function hexToRgb(hex){
+  hex = hex.replace('#','');
+  const bigint = parseInt(hex,16);
+  const r = (bigint >> 16) & 255;
+  const g = (bigint >> 8) & 255;
+  const b = bigint & 255;
+  return [r,g,b];
+}
+function rgbToHex(r,g,b){ return '#' + [r,g,b].map(v => v.toString(16).padStart(2,'0')).join(''); }
+function lighten(hex, amt){
+  const [r,g,b] = hexToRgb(hex);
+  return rgbToHex(clamp(Math.round(r + 255*amt),0,255), clamp(Math.round(g + 255*amt),0,255), clamp(Math.round(b + 255*amt),0,255));
+}
+function darken(hex, amt){
+  const [r,g,b] = hexToRgb(hex);
+  return rgbToHex(clamp(Math.round(r*(1-amt)),0,255), clamp(Math.round(g*(1-amt)),0,255), clamp(Math.round(b*(1-amt)),0,255));
+}
+function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+
+/* pocketed rendering: render accurate swatches with stripes/solids */
+function renderPocketed(pocketedList){
   pocketedEl.innerHTML = '';
-  (roomState.pocketed||[]).forEach(n => {
-    const el = document.createElement('div'); el.style.width='18px'; el.style.height='18px'; el.style.borderRadius='50%'; el.style.background='#fff'; el.style.margin='2px';
-    pocketedEl.appendChild(el);
+  (pocketedList||[]).forEach(n => {
+    if(n === 0) {
+      // cue shown as small white
+      const el = document.createElement('div'); el.className='pocket-swatch'; el.style.background = '#fff'; el.style.boxShadow='inset 0 -3px 6px rgba(0,0,0,0.15)';
+      pocketedEl.appendChild(el);
+      return;
+    }
+    const color = PALETTE[n] || '#ddd';
+    const sw = document.createElement('div'); sw.className='pocket-swatch';
+    // simulate stripe: white ring with colored center for stripes
+    if(n >= 9) {
+      sw.style.background = '#fff';
+      sw.style.border = '2px solid #222';
+      sw.style.position = 'relative';
+      const inner = document.createElement('div');
+      inner.style.width = '18px'; inner.style.height = '18px'; inner.style.borderRadius = '50%';
+      inner.style.background = color; inner.style.margin = 'auto'; inner.style.marginTop = '4px';
+      sw.appendChild(inner);
+    } else {
+      sw.style.background = color;
+      sw.style.border = '2px solid #222';
+    }
+    const lab = document.createElement('div');
+    lab.style.position = 'absolute';
+    lab.style.color = (n===8 ? '#fff':'#000');
+    lab.style.fontSize = '11px';
+    lab.style.fontWeight = '700';
+    lab.style.marginTop = '0';
+    // not visible overlay for accessibility; we won't append number to keep it clean
+    sw.style.display = 'inline-flex'; sw.style.alignItems = 'center'; sw.style.justifyContent = 'center';
+    pocketedEl.appendChild(sw);
   });
-  // notice text
-  if (roomState.ballInHand) noticeEl.textContent = 'Ball-in-hand: place cue.';
+}
+
+/* UI sync */
+function renderPlayersAndPocketed(state){
+  if(!state) return;
+  // players
+  playersEl.innerHTML = '';
+  (state.players||[]).forEach(p => {
+    const d = document.createElement('div');
+    d.textContent = (p.name || p.id) + (p.group ? ' ('+p.group+')' : '');
+    if(state.turn === p.id) d.className = 'current';
+    playersEl.appendChild(d);
+  });
+  renderPocketed(state.pocketed || []);
+  // notice
+  if(state.ballInHand) noticeEl.textContent = 'Ball-in-hand: place the cue.';
   else {
-    const moving = (roomState.balls||[]).some(b=>Math.hypot(b.vx||0,b.vy||0) > 0.02);
-    if (moving) noticeEl.textContent = 'Balls moving...';
-    else if (roomState.turn === myId) noticeEl.textContent = 'Your turn.';
+    const moving = (state.balls||[]).some(b => Math.hypot(b.vx||0, b.vy||0) > 0.02);
+    if(moving) noticeEl.textContent = 'Balls moving...';
+    else if(state.turn === myId) noticeEl.textContent = 'Your turn.';
     else {
-      const p = (roomState.players||[]).find(pp=>pp.id === roomState.turn);
+      const p = (state.players||[]).find(pp => pp.id === state.turn);
       noticeEl.textContent = p ? `Waiting for ${p.name}` : 'Waiting...';
     }
   }
 }
 
-function getInterpolatedState() {
-  if (!prevServerState || !lastServerState) return lastServerState ? lastServerState.state : null;
+/* interpolation helpers (same approach as before) */
+function getInterpolatedState(){
+  if(!prevServerState || !lastServerState) return lastServerState ? lastServerState.state : null;
   const a = prevServerState, b = lastServerState;
   const now = Date.now();
-  const t0 = a.serverTime || 0;
-  const t1 = b.serverTime || 0;
-  const target = t1 + interpolationDuration;
-  const alpha = (now - t1) / interpolationDuration;
-  const clamped = Math.max(0, Math.min(1, alpha));
+  const alpha = clamp((now - (b.serverTime || now) + interpolationDuration) / interpolationDuration, 0, 1);
   const mapA = new Map((a.state.balls||[]).map(x=>[x.id,x]));
-  const out = { balls: [] };
-  for (const be of (b.state.balls||[])) {
+  const outBalls = [];
+  for(const be of (b.state.balls||[])){
     const ae = mapA.get(be.id);
-    if (!ae) { out.balls.push(be); continue; }
-    const x = ae.x + (be.x - ae.x) * clamped;
-    const y = ae.y + (be.y - ae.y) * clamped;
-    const vx = ae.vx + (be.vx - ae.vx) * clamped;
-    const vy = ae.vy + (be.vy - ae.vy) * clamped;
-    out.balls.push(Object.assign({}, be, { x, y, vx, vy }));
+    if(!ae){ outBalls.push(be); continue; }
+    outBalls.push({
+      ...be,
+      x: ae.x + (be.x - ae.x) * alpha,
+      y: ae.y + (be.y - ae.y) * alpha,
+      vx: ae.vx + (be.vx - ae.vx) * alpha,
+      vy: ae.vy + (be.vy - ae.vy) * alpha
+    });
   }
-  out.players = b.state.players; out.pocketed = b.state.pocketed; out.turn = b.state.turn; out.ballInHand = b.state.ballInHand; out.lastEvent = b.state.lastEvent;
-  return out;
+  return { balls: outBalls, pocketed: b.state.pocketed, players: b.state.players, turn: b.state.turn, ballInHand: b.state.ballInHand, lastEvent: b.state.lastEvent };
 }
 
-/* auto request server state periodically */
-setInterval(()=>{ if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'request_state' })); }, 1200);
+/* input handling (unchanged behaviour) */
+canvas.addEventListener('mousedown', e=>{
+  if(!lastServerState) return;
+  const state = lastServerState.state;
+  if(!state.turn || state.turn !== myId) return;
+  if(state.ballInHand){
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    if(ws && ws.readyState===1) ws.send(JSON.stringify({ t:'place_cue', x: mx, y: my }));
+    return;
+  }
+  if(!state.balls.every(b => Math.hypot(b.vx||0, b.vy||0) < 0.03)) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const cue = state.balls.find(b => b.id === 'cue');
+  if(!cue) return;
+  dragging = { cx: cue.x, cy: cue.y, mx, my };
+});
+canvas.addEventListener('mousemove', e=>{
+  if(!dragging) return;
+  const rect = canvas.getBoundingClientRect();
+  dragging.mx = e.clientX - rect.left; dragging.my = e.clientY - rect.top;
+});
+window.addEventListener('mouseup', e=>{
+  if(!dragging) return;
+  const dx = dragging.cx - dragging.mx, dy = dragging.cy - dragging.my;
+  const dist = Math.hypot(dx, dy);
+  const power = Math.min(1, dist / 180);
+  const angle = Math.atan2(dy, dx) + Math.PI;
+  if(ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'shoot', power, angle }));
+  dragging = null;
+});
 
-/* start animation */
+/* main render loop */
+function render(){
+  // background table
+  drawTableBackground();
+
+  const s = getInterpolatedState() || (lastServerState ? lastServerState.state : null);
+  if(s && s.balls){
+    // draw balls sorted by y for simple depth
+    const sorted = s.balls.slice().sort((a,b)=>a.y - b.y);
+    for(const b of sorted) drawBall(b);
+  }
+  // overlay vignette once
+  drawOverlay();
+
+  requestAnimationFrame(render);
+}
+
+/* overlay vignette drawn once */
+function drawOverlay(){
+  octx.clearRect(0,0,overlay.width,overlay.height);
+  const g = octx.createRadialGradient(400,200,50,400,200,600);
+  g.addColorStop(0,'rgba(255,255,255,0.02)');
+  g.addColorStop(1,'rgba(0,0,0,0.45)');
+  octx.fillStyle = g;
+  octx.fillRect(0,0,overlay.width,overlay.height);
+}
+
+/* server browser + state polling already implemented earlier */
+function renderPlayersAndPocketedFromLatest(){
+  if(!lastServerState) return;
+  renderPlayersAndPocketed(lastServerState.state);
+}
+
+/* handle server messages + polling */
+function pollState(){
+  if(ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'request_state' }));
+}
+setInterval(pollState, 1200);
+setInterval(fetchRooms, 4000);
+
+/* start */
 render();
+
 </script>
 </body>
 </html>
