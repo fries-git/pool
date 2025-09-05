@@ -2,22 +2,25 @@
 <html>
 <head>
 <meta charset="utf-8" />
-<title>Pool — fixed prediction + pocketed cue filter</title>
+<title>Pool — fixes</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <style>
 :root{--bg:#0f1113;--panel:#151617;--muted:#9aa0a6;--accent:#2a9df4}
 html,body{height:100%;margin:0;background:var(--bg);color:#eee;font-family:system-ui}
 .top{display:flex;gap:8px;padding:10px;align-items:center}
-input,button{padding:8px;border-radius:8px;border:none;background:var(--panel);color:#eee}
+input,button,select{padding:8px;border-radius:8px;border:none;background:var(--panel);color:#eee}
 button{background:var(--accent);cursor:pointer}
 .container{display:flex;gap:12px;align-items:flex-start;justify-content:center;padding-bottom:20px}
 canvas{background:transparent;border-radius:8px;box-shadow:0 12px 30px rgba(0,0,0,0.6)}
-.panel{width:300px;background:linear-gradient(180deg,#111,#121314);padding:12px;border-radius:8px}
+.panel{width:320px;background:linear-gradient(180deg,#111,#121314);padding:12px;border-radius:8px}
 .small{font-size:13px;color:var(--muted)}
 .players .current{color:var(--accent);font-weight:700}
 .pocket-grid{display:flex;flex-wrap:wrap;gap:6px}
-.pocket-swatch{width:30px;height:30px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:11px}
+.pocket-swatch{width:30px;height:30px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:11px;position:relative}
+.pocket-swatch .inner{width:18px;height:18px;border-radius:50%}
 #chatbox{height:140px;overflow:auto;background:rgba(255,255,255,0.02);padding:6px;border-radius:6px;margin-bottom:6px}
+.server-list{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+.server-item{display:flex;justify-content:space-between;align-items:center;padding:8px;background:rgba(255,255,255,0.02);border-radius:8px}
 </style>
 </head>
 <body>
@@ -29,16 +32,19 @@ canvas{background:transparent;border-radius:8px;box-shadow:0 12px 30px rgba(0,0,
   <div id="status" class="small" style="margin-left:8px">disconnected</div>
 </div>
 
-<div class="container">
+<div style="display:flex;gap:12px;justify-content:center">
   <canvas id="table" width="800" height="400"></canvas>
 
   <div class="panel">
+    <div><strong>Server Browser</strong></div>
+    <div id="serverBrowser" class="server-list small"></div>
+    <hr style="margin:8px 0;border:none;border-top:1px solid rgba(255,255,255,0.03)" />
     <div><strong>Players</strong></div>
     <div id="players" class="small players"></div>
-    <hr />
+    <hr style="margin:8px 0;border:none;border-top:1px solid rgba(255,255,255,0.03)" />
     <div><strong>Pocketed</strong></div>
     <div id="pocketed" class="pocket-grid small"></div>
-    <hr />
+    <hr style="margin:8px 0;border:none;border-top:1px solid rgba(255,255,255,0.03)" />
     <div><strong>Chat</strong></div>
     <div id="chatbox"></div>
     <input id="chat" placeholder="message" />
@@ -47,7 +53,7 @@ canvas{background:transparent;border-radius:8px;box-shadow:0 12px 30px rgba(0,0,
 </div>
 
 <script>
-/* Minimal, robust client. Fixes: reliable prediction line + filter out cue from pocketed list. */
+/* Client: server browser, clean chat, proper pocketed swatches, prediction preserved */
 const canvas = document.getElementById('table');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
@@ -55,44 +61,44 @@ const playersEl = document.getElementById('players');
 const pocketedEl = document.getElementById('pocketed');
 const chatBox = document.getElementById('chatbox');
 const noticeEl = document.getElementById('notice');
+const serverBrowser = document.getElementById('serverBrowser');
 
 let ws = null, myId = null;
-let lastServerState = null, prevServerState = null;
-let dragging = null, username = '';
+let lastServerState = null, prevServerState = null, dragging = null;
 const SHOOT_SCALE = 14;
 const POCKET_RADIUS = 28;
 const PALETTE = {1:'#FFD400',2:'#0047AB',3:'#C41E3A',4:'#6A0DAD',5:'#FF8C00',6:'#006400',7:'#6F1D1B',8:'#000000',9:'#FFD400',10:'#0047AB',11:'#C41E3A',12:'#6A0DAD',13:'#FF8C00',14:'#006400',15:'#6F1D1B'};
 
-/* --- Network --- */
 function setStatus(s){ statusEl.textContent = s; }
-function connect(){
-  if(ws && (ws.readyState===1||ws.readyState===0)) return;
-  const proto = (location.protocol==='https:') ? 'wss' : 'ws';
-  ws = new WebSocket(proto + '://' + location.host);
+function connect(){ if(ws && (ws.readyState===1||ws.readyState===0)) return; const proto = (location.protocol==='https:') ? 'wss' : 'ws'; ws = new WebSocket(proto+'://'+location.host);
   ws.onopen = ()=> setStatus('connected');
   ws.onclose = ()=> setStatus('disconnected');
   ws.onmessage = ev => {
     const msg = JSON.parse(ev.data);
-    if(msg.t === 'joined'){ myId = msg.id; setStatus('in room '+msg.code); noticeEl.textContent = 'In room '+msg.code; }
-    else if(msg.t === 'state'){ prevServerState = lastServerState; lastServerState = msg; renderPlayersAndPocketed(msg.state); }
-    else if(msg.t === 'chat'){ addChat(msg.from+': '+msg.msg); }
-    else if(msg.t === 'shoot_rejected'){ noticeEl.textContent = 'Shot rejected: '+(msg.reason||''); setTimeout(()=>noticeEl.textContent='',1500); }
-    else if(msg.t === 'place_rejected'){ noticeEl.textContent = 'Place rejected: '+(msg.reason||''); setTimeout(()=>noticeEl.textContent='',1500); }
-    else if(msg.t === 'error'){ addChat('ERROR: '+(msg.msg||'')); }
-    else if(msg.t === 'assigned') addChat('SYSTEM: '+msg.playerId+' -> '+msg.group);
-    else if(msg.t === 'game_over') addChat('GAME OVER: '+(msg.winner||'')+' — '+(msg.reason||''));
+    switch(msg.t){
+      case 'joined': myId = msg.id; setStatus('in room '+msg.code); noticeEl.textContent = 'In room '+msg.code; break;
+      case 'state': prevServerState = lastServerState; lastServerState = msg; renderPlayersAndPocketed(msg.state); break;
+      case 'chat': addChat(msg.from+': '+msg.msg); break;
+      case 'shoot_rejected': noticeEl.textContent = 'Shot rejected: '+(msg.reason||''); setTimeout(()=>noticeEl.textContent='',1400); break;
+      case 'place_rejected': noticeEl.textContent = 'Place rejected: '+(msg.reason||''); setTimeout(()=>noticeEl.textContent='',1400); break;
+      case 'assigned': addSystem('Assigned: '+msg.playerId+' -> '+msg.group); break;
+      case 'foul': addSystem('Foul: '+(msg.msg||'')); break;
+      case 'game_over': addSystem('Game Over: '+(msg.winner||'')+' — '+(msg.reason||'')); break;
+      case 'error': addSystem('Error: '+(msg.msg||'')); break;
+      default: break;
+    }
   };
 }
 
 /* UI */
 document.getElementById('create').onclick = ()=>{
-  username = (document.getElementById('username').value || 'Host').trim();
+  const username = (document.getElementById('username').value || 'Host').trim();
   connect();
   if(ws.readyState===1) ws.send(JSON.stringify({ t:'create', name: username }));
   else ws.addEventListener('open', ()=> ws.send(JSON.stringify({ t:'create', name: username })), { once:true });
 };
 document.getElementById('join').onclick = ()=>{
-  username = (document.getElementById('username').value || 'Player').trim();
+  const username = (document.getElementById('username').value || 'Player').trim();
   const code = (document.getElementById('room').value || '').trim().toUpperCase();
   if(!code) return;
   connect();
@@ -100,89 +106,69 @@ document.getElementById('join').onclick = ()=>{
   else ws.addEventListener('open', ()=> ws.send(JSON.stringify({ t:'join', code, name: username })), { once:true });
 };
 document.getElementById('chat').addEventListener('keydown', e=>{
-  if(e.key === 'Enter' && ws && ws.readyState===1){
+  if(e.key==='Enter' && ws && ws.readyState===1){
     const txt = e.target.value.trim(); if(!txt) return; ws.send(JSON.stringify({ t:'chat', msg: txt })); e.target.value='';
   }
 });
 function addChat(s){ const d=document.createElement('div'); d.textContent = s; chatBox.appendChild(d); chatBox.scrollTop = chatBox.scrollHeight; }
+function addSystem(s){ const d=document.createElement('div'); d.textContent = '• ' + s; d.style.color = '#9aa0a6'; chatBox.appendChild(d); chatBox.scrollTop = chatBox.scrollHeight; }
 
-/* --- Prediction: reliable first-collision raycast with wall bounces and pocket detection --- */
+/* server browser */
+function fetchRooms(){ fetch('/rooms').then(r=>r.json()).then(renderServers).catch(()=>{}); }
+function renderServers(list){
+  serverBrowser.innerHTML = '';
+  if(!list.length) { serverBrowser.innerHTML = '<div class="small">No active rooms</div>'; return; }
+  list.forEach(r => {
+    const div = document.createElement('div'); div.className='server-item';
+    div.innerHTML = `<div>${r.code} (${r.players}/2) ${r.host?'- '+r.host:''}</div><div><button data-code="${r.code}">Join</button></div>`;
+    const btn = div.querySelector('button'); btn.onclick = ()=>{ document.getElementById('room').value = r.code; document.getElementById('join').click(); };
+    serverBrowser.appendChild(div);
+  });
+}
+fetchRooms(); setInterval(fetchRooms, 4000);
+
+/* Prediction: first-collision raycast */
 function predictPath(cueX, cueY, angle, power, maxLen=1200){
-  const segments = [];
-  let x = cueX, y = cueY;
-  let vx = Math.cos(angle) * power * SHOOT_SCALE;
-  let vy = Math.sin(angle) * power * SHOOT_SCALE;
-  const step = 6;
-  const ballsAuth = lastServerState ? (lastServerState.state.balls || []) : [];
+  const segments = []; let x = cueX, y = cueY;
+  let vx = Math.cos(angle) * power * SHOOT_SCALE, vy = Math.sin(angle) * power * SHOOT_SCALE;
+  const step = 6, maxSteps = Math.ceil(maxLen/step);
+  const ballsAuth = lastServerState ? (lastServerState.state.balls||[]) : [];
   const pockets = [{x:0,y:0},{x:400,y:0},{x:800,y:0},{x:0,y:400},{x:400,y:400},{x:800,y:400}];
-
-  // advance until hit pocket or first ball or until maxLen
   let traveled = 0;
-  const maxSteps = Math.ceil(maxLen / step);
   for(let s=0;s<maxSteps;s++){
-    const nx = x + vx * (step/60);
-    const ny = y + vy * (step/60);
-
-    // pocket check (tolerant)
-    for(const p of pockets){
-      const d = Math.hypot(nx - p.x, ny - p.y);
-      if(d <= POCKET_RADIUS + 6){
-        segments.push({ x: nx, y: ny, pocket: true });
-        return segments;
-      }
-    }
-
-    // ball hit check (first collision) - skip cue
-    for(const b of ballsAuth){
-      if(b.id === 'cue') continue;
-      const d = Math.hypot(nx - b.x, ny - b.y);
-      if(d <= (b.r || 10) + 2){
-        segments.push({ x: nx, y: ny, hitBallId: b.id });
-        return segments;
-      }
-    }
-
-    // wall reflection simple handling: if next would go outside, reflect velocity and commit position
-    if(nx - 10 < 0){ vx = -vx; x = 10; y = ny; }
-    else if(nx + 10 > canvas.width){ vx = -vx; x = canvas.width - 10; y = ny; }
-    else x = nx;
-
-    if(ny - 10 < 0){ vy = -vy; y = 10; x = nx; }
-    else if(ny + 10 > canvas.height){ vy = -vy; y = canvas.height - 10; x = nx; }
-    else y = ny;
-
+    const nx = x + vx * (step/60), ny = y + vy * (step/60);
+    // pocket
+    for(const p of pockets){ if(Math.hypot(nx-p.x, ny-p.y) <= POCKET_RADIUS + 6){ segments.push({x:nx,y:ny,pocket:true}); return segments; } }
+    // ball collision (first)
+    for(const b of ballsAuth){ if(b.id === 'cue') continue; if(Math.hypot(nx-b.x, ny-b.y) <= (b.r||10) + 2){ segments.push({x:nx,y:ny,hitBallId:b.id}); return segments; } }
+    // walls reflect
+    if(nx - 10 < 0){ vx = -vx; x = 10; y = ny; } else if(nx + 10 > canvas.width){ vx = -vx; x = canvas.width - 10; y = ny; } else x = nx;
+    if(ny - 10 < 0){ vy = -vy; y = 10; x = nx; } else if(ny + 10 > canvas.height){ vy = -vy; y = canvas.height - 10; x = nx; } else y = ny;
     traveled += step;
-    if(traveled % 80 === 0) segments.push({ x, y, pocket:false }); // sample points for line
-    // slight attenuation so very long shots reduce
+    if(traveled % 80 === 0) segments.push({x,y,pocket:false});
     vx *= 0.999; vy *= 0.999;
   }
-  // no hit found, return sampled segments
-  segments.push({ x, y, pocket:false });
+  segments.push({x,y,pocket:false});
   return segments;
 }
 
-/* --- Input handling & dragging --- */
+/* input */
 canvas.addEventListener('mousedown', e=>{
   const st = lastServerState ? lastServerState.state : null;
   if(!st) return;
-  if(!st.turn || st.turn !== myId){ noticeEl.textContent='Not your turn'; setTimeout(()=>noticeEl.textContent='',1000); return; }
-  if(st.ballInHand){
-    const rect = canvas.getBoundingClientRect(); const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-    if(ws && ws.readyState===1) ws.send(JSON.stringify({ t:'place_cue', x: mx, y: my }));
-    return;
-  }
+  if(!st.turn || st.turn !== myId){ noticeEl.textContent='Not your turn'; setTimeout(()=>noticeEl.textContent='',900); return; }
+  if(st.ballInHand){ const rect = canvas.getBoundingClientRect(); const mx = e.clientX-rect.left, my = e.clientY-rect.top; if(ws && ws.readyState===1) ws.send(JSON.stringify({ t:'place_cue', x: mx, y: my })); return; }
   const moving = (st.balls||[]).some(b => Math.hypot(b.vx||0,b.vy||0) > 0.03);
-  if(moving){ noticeEl.textContent='Balls still moving'; setTimeout(()=>noticeEl.textContent='',1000); return; }
-  const rect = canvas.getBoundingClientRect(); const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  if(moving){ noticeEl.textContent='Balls still moving'; setTimeout(()=>noticeEl.textContent='',900); return; }
+  const rect = canvas.getBoundingClientRect(); const mx = e.clientX-rect.left, my = e.clientY-rect.top;
   const cue = st.balls.find(b => b.id === 'cue'); if(!cue) return;
   dragging = { cx: cue.x, cy: cue.y, mx, my, pred: [] };
-  // immediately compute prediction so line appears without delay
   updateDraggingPrediction();
 });
 canvas.addEventListener('mousemove', e=>{
   if(!dragging) return;
   const rect = canvas.getBoundingClientRect();
-  dragging.mx = e.clientX - rect.left; dragging.my = e.clientY - rect.top;
+  dragging.mx = e.clientX-rect.left; dragging.my = e.clientY-rect.top;
   updateDraggingPrediction();
 });
 window.addEventListener('mouseup', e=>{
@@ -193,7 +179,6 @@ window.addEventListener('mouseup', e=>{
   if(ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'shoot', power, angle }));
   dragging = null;
 });
-
 function updateDraggingPrediction(){
   if(!dragging) return;
   const dx = dragging.cx - dragging.mx, dy = dragging.cy - dragging.my;
@@ -202,32 +187,21 @@ function updateDraggingPrediction(){
   dragging.pred = predictPath(dragging.cx, dragging.cy, angle, power);
 }
 
-/* --- Rendering & interpolation (simple; we focus on reliable visuals) --- */
-function getLatestStateInterpolated(){
-  if(!lastServerState) return null;
-  // use last authoritative state directly for simplicity (fine for visuals)
-  return lastServerState.state;
-}
-
+/* rendering */
 function renderPlayersAndPocketed(state){
   if(!state) return;
   playersEl.innerHTML = '';
   (state.players||[]).forEach(p => {
-    const d = document.createElement('div'); d.textContent = (p.name||p.id) + (p.group ? ' ('+p.group+')' : '');
-    if(state.turn === p.id) d.className = 'current';
-    playersEl.appendChild(d);
+    const d = document.createElement('div'); d.textContent = (p.name||p.id) + (p.group ? ' ('+p.group+')' : ''); if(state.turn === p.id) d.className='current'; playersEl.appendChild(d);
   });
 
-  // IMPORTANT: filter out cue (num === 0) from the pocketed list
   pocketedEl.innerHTML = '';
   (state.pocketed||[]).forEach(n => {
-    if(n === 0) return; // skip cue
-    const el = document.createElement('div'); el.className = 'pocket-swatch';
+    if(n === 0) return; // skip cue ball in pocketed UI
+    const el = document.createElement('div'); el.className='pocket-swatch';
     if(n >= 9){
       el.style.background = '#fff'; el.style.border = '2px solid #222';
-      const inner = document.createElement('div');
-      inner.style.width='18px'; inner.style.height='18px'; inner.style.borderRadius='50%'; inner.style.background = PALETTE[n] || '#ddd';
-      inner.style.margin='auto'; inner.style.marginTop='4px';
+      const inner = document.createElement('div'); inner.className='inner'; inner.style.background = PALETTE[n] || '#ddd';
       el.appendChild(inner);
     } else {
       el.style.background = PALETTE[n] || '#ddd'; el.style.border = '2px solid #222';
@@ -237,48 +211,37 @@ function renderPlayersAndPocketed(state){
 
   if(state.ballInHand) noticeEl.textContent = 'Ball-in-hand: place the cue';
   else {
-    const moving = (state.balls||[]).some(b => Math.hypot(b.vx||0,b.vy||0) > 0.03);
+    const moving = (state.balls||[]).some(b=>Math.hypot(b.vx||0,b.vy||0) > 0.03);
     if(moving) noticeEl.textContent = 'Balls moving...';
     else if(state.turn === myId) noticeEl.textContent = 'Your turn';
-    else {
-      const p = (state.players||[]).find(pp => pp.id === state.turn);
-      noticeEl.textContent = p ? `Waiting for ${p.name}` : 'Waiting...';
-    }
+    else { const p = (state.players||[]).find(pp=>pp.id === state.turn); noticeEl.textContent = p ? `Waiting for ${p.name}` : 'Waiting...'; }
   }
 }
 
-/* draw balls */
 function drawBall(b){
   const x = b.x, y = b.y, r = b.r || 10;
-  // shadow
   ctx.beginPath(); ctx.ellipse(x+3, y+5, r*0.95, r*0.6, 0, 0, Math.PI*2); ctx.fillStyle='rgba(0,0,0,0.45)'; ctx.fill();
-  // body
-  if(b.stripe){
-    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill();
-    ctx.beginPath(); ctx.arc(x,y,r*0.66,0,Math.PI*2); ctx.fillStyle = b.color || '#ddd'; ctx.fill();
-  } else {
-    const grad = ctx.createRadialGradient(x - r*0.3, y - r*0.5, r*0.1, x, y, r*1.1);
-    grad.addColorStop(0,'#fff'); grad.addColorStop(0.12, b.color || '#ddd'); grad.addColorStop(1,'#000');
-    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle = grad; ctx.fill();
-  }
+  if(b.stripe){ ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill(); ctx.beginPath(); ctx.arc(x,y,r*0.66,0,Math.PI*2); ctx.fillStyle=b.color||'#ddd'; ctx.fill(); }
+  else { const grad = ctx.createRadialGradient(x - r*0.3, y - r*0.5, r*0.1, x, y, r*1.1); grad.addColorStop(0,'#fff'); grad.addColorStop(0.12,b.color||'#ddd'); grad.addColorStop(1,'#000'); ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle=grad; ctx.fill(); }
   ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.stroke();
-  // specular
   ctx.beginPath(); ctx.ellipse(x - r*0.35, y - r*0.55, r*0.35, r*0.55, -0.6, 0, Math.PI*2); ctx.fillStyle='rgba(255,255,255,0.55)'; ctx.fill();
-  if(b.num !== 0){ ctx.fillStyle = '#000'; ctx.font = '10px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(String(b.num), x, y); }
+  if(b.num !== 0){ ctx.fillStyle='#000'; ctx.font='10px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(String(b.num), x, y); }
+}
+
+function getLatestState(){
+  // keep it simple: use latest authoritative state
+  return lastServerState ? lastServerState.state : null;
 }
 
 function draw(){
-  // table background
+  // table
   const g = ctx.createLinearGradient(0,0,0,canvas.height); g.addColorStop(0,'#0b3c22'); g.addColorStop(1,'#0c4a2b'); ctx.fillStyle=g; ctx.fillRect(0,0,canvas.width,canvas.height);
-  // pockets
-  ctx.fillStyle = '#000'; [[0,0],[400,0],[800,0],[0,400],[400,400],[800,400]].forEach(p=>{ ctx.beginPath(); ctx.arc(p[0],p[1],POCKET_RADIUS,0,Math.PI*2); ctx.fill(); });
+  ctx.fillStyle='#000'; [[0,0],[400,0],[800,0],[0,400],[400,400],[800,400]].forEach(p=>{ ctx.beginPath(); ctx.arc(p[0],p[1],POCKET_RADIUS,0,Math.PI*2); ctx.fill(); });
 
-  const state = getLatestStateInterpolated();
-  if(state && state.balls){
-    const sorted = state.balls.slice().sort((a,b)=>a.y - b.y);
+  const s = getLatestState();
+  if(s && s.balls){
+    const sorted = s.balls.slice().sort((a,b)=>a.y - b.y);
     for(const b of sorted) drawBall(b);
-
-    // draw prediction line if dragging exists and pred available
     if(dragging && Array.isArray(dragging.pred) && dragging.pred.length){
       ctx.beginPath(); ctx.setLineDash([6,6]); ctx.lineWidth = 2; ctx.strokeStyle = '#fff';
       ctx.moveTo(dragging.cx, dragging.cy);
@@ -289,9 +252,8 @@ function draw(){
   requestAnimationFrame(draw);
 }
 
-/* request state periodically so chat and UI update */
 setInterval(()=>{ if(ws && ws.readyState===1) ws.send(JSON.stringify({ t:'request_state' })); }, 1200);
-
+setInterval(fetchRooms, 4000);
 draw();
 </script>
 </body>
