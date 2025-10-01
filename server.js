@@ -21,7 +21,7 @@ const GLOBAL_FRICTION = 0.993;   // per tick multiplicative velocity factor
 const LOW_SPEED_FRICTION = 0.88; // extra damping when very slow
 const STOP_THRESH = 0.03;
 const SLOW_SPEED = 0.25;
-const SHOOT_SCALE = 14;
+const SHOOT_SCALE = 75;
 const MAX_PLAYERS = 2;
 const ROOM_IDLE_MS = 1000 * 60 * 5;
 const POCKET_CAP = 128;
@@ -396,3 +396,4 @@ wss.on('connection', ws => {
     else sendToRoom(room, makeStatePayload(room));
   });
 });
+
