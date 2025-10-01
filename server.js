@@ -15,10 +15,10 @@ const TABLE_W = 800, TABLE_H = 400;
 const BALL_R = 10;
 const POCKET_RADIUS = 28;
 const POCKET_NEAR_MARGIN = 8;
-const TICK_RATE = 60;
+const TICK_RATE = 60;            // ticks per second
 const BROADCAST_RATE = 20;
-const GLOBAL_FRICTION = 0.993;
-const LOW_SPEED_FRICTION = 0.88;
+const GLOBAL_FRICTION = 0.993;   // per tick multiplicative velocity factor
+const LOW_SPEED_FRICTION = 0.88; // extra damping when very slow
 const STOP_THRESH = 0.03;
 const SLOW_SPEED = 0.25;
 const SHOOT_SCALE = 14;
@@ -64,25 +64,48 @@ function makeRack() {
   return balls;
 }
 
+/* Improved collision resolver:
+   - always separate overlapping balls (even if relative vel >= 0)
+   - handle zero-distance by small jitter
+   - apply impulse only if they are moving toward each other
+*/
 function resolveBallCollision(a, b) {
-  const dx = b.x - a.x, dy = b.y - a.y;
-  const dist = Math.hypot(dx, dy);
-  if (!dist) return;
+  let dx = b.x - a.x, dy = b.y - a.y;
+  let dist = Math.hypot(dx, dy);
   const minDist = a.r + b.r;
+
+  if (dist === 0) {
+    // tiny jitter to avoid NaNs and permanent overlap
+    const jitter = 0.001;
+    dx = jitter; dy = 0;
+    dist = jitter;
+  }
+
   if (dist >= minDist) return;
+
+  // normal
   const nx = dx / dist, ny = dy / dist;
+
+  // positional correction (push them apart)
+  const overlap = minDist - dist;
+  const correction = (overlap / 2) + 0.001;
+  a.x -= nx * correction;
+  a.y -= ny * correction;
+  b.x += nx * correction;
+  b.y += ny * correction;
+
+  // relative velocity along normal
   const rvx = b.vx - a.vx, rvy = b.vy - a.vy;
   const rel = rvx * nx + rvy * ny;
-  if (rel > 0) return;
-  const e = 0.98;
-  const j = -(1 + e) * rel / 2;
+
+  // only apply impulse if they are moving toward each other
+  if (rel >= 0) return;
+
+  const e = 0.98; // restitution
+  const j = -(1 + e) * rel / 2; // equal mass -> divide by 2
   const ix = j * nx, iy = j * ny;
   a.vx -= ix; a.vy -= iy;
   b.vx += ix; b.vy += iy;
-  const overlap = minDist - dist;
-  const corr = overlap / 2 + 0.01;
-  a.x -= nx * corr; a.y -= ny * corr;
-  b.x += nx * corr; b.y += ny * corr;
 }
 
 function ballShouldPocket(ball) {
@@ -125,7 +148,19 @@ function makeStatePayload(room) {
   return {
     t: 'state',
     state: {
-      balls: room.state.balls.map(b => ({ id: b.id, num: b.num, x: b.x, y: b.y, r: b.r, vx: b.vx, vy: b.vy, color: b.color, stripe: b.stripe })),
+      balls: room.state.balls.map(b => ({
+        id: b.id,
+        num: b.num,
+        x: b.x, y: b.y, r: b.r,
+        vx: b.vx, vy: b.vy,
+        color: b.color,
+        stripe: !!b.stripe,
+        // new rendering hints for clients (optional)
+        pattern: b.stripe ? 'stripe' : 'solid',
+        stripeColor: '#ffffff',
+        stripeWidth: Math.round(b.r * 1.2),
+        stripeAngle: 0 // clients can randomize or animate this
+      })),
       pocketed: room.state.pocketed.slice(-POCKET_CAP),
       players: room.players.map(p => ({ id: p.id, name: p.name, group: room.assigned ? room.assigned[p.id] : null })),
       turn: room.players[room.turnIndex] ? room.players[room.turnIndex].id : null,
@@ -147,22 +182,36 @@ setInterval(() => {
     room.lastActive = now;
     const balls = room.state.balls;
     const substeps = 2;
+
+    // compute per-step dt properly; velocities are in px/sec
+    const dt = 1 / TICK_RATE;
+    const dtSub = dt / substeps;
+
     for (let s = 0; s < substeps; s++) {
       for (const b of balls) {
-        b.x += (b.vx) / TICK_RATE * (60 / substeps);
-        b.y += (b.vy) / TICK_RATE * (60 / substeps);
-        b.vx *= GLOBAL_FRICTION; b.vy *= GLOBAL_FRICTION;
-        const sp = vecLen(b.vx, b.vy);
-        if (sp > 0 && sp < SLOW_SPEED) { b.vx *= LOW_SPEED_FRICTION; b.vy *= LOW_SPEED_FRICTION; }
-        if (vecLen(b.vx, b.vy) < STOP_THRESH) { b.vx = 0; b.vy = 0; }
+        b.x += b.vx * dtSub;
+        b.y += b.vy * dtSub;
+
+        // bounds with correction
         if (b.x - b.r < 0) { b.x = b.r; b.vx = -b.vx * 0.98; }
         if (b.x + b.r > TABLE_W) { b.x = TABLE_W - b.r; b.vx = -b.vx * 0.98; }
         if (b.y - b.r < 0) { b.y = b.r; b.vy = -b.vy * 0.98; }
         if (b.y + b.r > TABLE_H) { b.y = TABLE_H - b.r; b.vy = -b.vy * 0.98; }
       }
+
+      // collisions
       for (let i = 0; i < balls.length; i++) {
         for (let j = i + 1; j < balls.length; j++) resolveBallCollision(balls[i], balls[j]);
       }
+    }
+
+    // apply friction once per tick (not every substep)
+    for (const b of balls) {
+      b.vx *= GLOBAL_FRICTION;
+      b.vy *= GLOBAL_FRICTION;
+      const sp = vecLen(b.vx, b.vy);
+      if (sp > 0 && sp < SLOW_SPEED) { b.vx *= LOW_SPEED_FRICTION; b.vy *= LOW_SPEED_FRICTION; }
+      if (vecLen(b.vx, b.vy) < STOP_THRESH) { b.vx = 0; b.vy = 0; }
     }
 
     // pocket detection
