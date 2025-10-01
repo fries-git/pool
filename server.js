@@ -19,7 +19,7 @@ const TICK_RATE = 60;            // ticks per second
 const BROADCAST_RATE = 20;
 const GLOBAL_FRICTION = 0.993;   // per tick multiplicative velocity factor
 const LOW_SPEED_FRICTION = 0.88; // extra damping when very slow
-const STOP_THRESH = 0.03;
+const STOP_THRESH = 0.1;
 const SLOW_SPEED = 0.25;
 const SHOOT_SCALE = 175;
 const MAX_PLAYERS = 2;
@@ -396,5 +396,6 @@ wss.on('connection', ws => {
     else sendToRoom(room, makeStatePayload(room));
   });
 });
+
 
 
